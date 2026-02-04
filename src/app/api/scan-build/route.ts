@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { scanWebglBuildZip } from "@/lib/scanners/scanWebglBuildZip";
+import { scanWebglBuildZip } from "../../../../src/lib/scanners/scanWebglBuildZip";
+
+
 
 export const runtime = "nodejs";
 
