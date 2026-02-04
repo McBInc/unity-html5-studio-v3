@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+import JSZip from "jszip";
 
 type ScanResponse = {
   kind: string;
@@ -24,23 +25,129 @@ export default function HomePage() {
   }, [resp]);
 
   async function runScan() {
-    if (!file) return;
-    setBusy(true);
-    setErr(null);
-    setResp(null);
-    try {
-      const fd = new FormData();
-      fd.append("zip", file);
-      const r = await fetch("/api/scan-build", { method: "POST", body: fd });
-      if (!r.ok) throw new Error(await r.text());
-      const data = (await r.json()) as ScanResponse;
-      setResp(data);
-    } catch (e: any) {
-      setErr(e?.message || "Scan failed");
-    } finally {
-      setBusy(false);
+  if (!file) return;
+  setBusy(true);
+  setErr(null);
+  setResp(null);
+
+  try {
+    // Read zip in the browser (no upload to server)
+    const ab = await file.arrayBuffer();
+    const zip = await JSZip.loadAsync(ab);
+
+    // Collect file list with sizes
+    const entries = Object.values(zip.files).filter((z) => !z.dir);
+
+    // Helper: find by suffix (Unity build names vary)
+    const hasSuffix = (name: string, suffixes: string[]) =>
+      suffixes.some((s) => name.toLowerCase().endsWith(s));
+
+    const brotli_present = entries.some((e) => e.name.toLowerCase().endsWith(".br"));
+    const gzip_present = entries.some((e) => e.name.toLowerCase().endsWith(".gz"));
+
+    // Memory hints: best-effort search loader js for "memory" numbers
+    // We'll scan any *.loader.js or *loader.js file found in the zip.
+    const loaderFiles = entries
+      .filter((e) => e.name.toLowerCase().endsWith(".js"))
+      .filter((e) => e.name.toLowerCase().includes("loader"));
+
+    let memory_settings_detected_bytes: number[] = [];
+
+    for (const lf of loaderFiles.slice(0, 5)) {
+      try {
+        const text = await zip.file(lf.name)!.async("string");
+
+        // Common patterns:
+        // - "TOTAL_MEMORY: 268435456"
+        // - "TOTAL_MEMORY": 268435456
+        // - "totalMemory": 268435456
+        // - "memory": 268435456
+        const matches = [...text.matchAll(/(TOTAL_MEMORY|totalMemory|memory)\s*[:=]\s*(\d{7,12})/g)];
+        for (const m of matches) {
+          const n = Number(m[2]);
+          if (Number.isFinite(n) && n > 32 * 1024 * 1024 && n < 8 * 1024 * 1024 * 1024) {
+            memory_settings_detected_bytes.push(n);
+          }
+        }
+      } catch {
+        // ignore
+      }
     }
+
+    // Unique + sorted
+    memory_settings_detected_bytes = Array.from(new Set(memory_settings_detected_bytes)).sort((a, b) => a - b);
+
+    // Compute quick score (simple heuristic)
+    let quick_score = 50;
+    if (brotli_present) quick_score += 20;
+    if (gzip_present) quick_score += 10;
+
+    // Detect key Unity build artifacts
+    const hasData = entries.some((e) => hasSuffix(e.name, [".data", ".data.br", ".data.gz"]));
+    const hasWasm = entries.some((e) => hasSuffix(e.name, [".wasm", ".wasm.br", ".wasm.gz"]));
+    const hasFramework = entries.some((e) => e.name.toLowerCase().includes("framework") && e.name.toLowerCase().endsWith(".js") || e.name.toLowerCase().includes("framework.js."));
+    const hasLoader = loaderFiles.length > 0;
+
+    if (hasData && hasWasm && hasLoader) quick_score += 15;
+    if (!hasWasm) quick_score -= 25;
+    if (!hasLoader) quick_score -= 25;
+
+    quick_score = Math.max(0, Math.min(100, quick_score));
+
+    // File sizes (no hashing in browser for speed)
+    // We’ll show the biggest interesting ones + top 25 overall.
+    const files = entries
+      .map((e) => ({
+        name: e.name,
+        size_bytes: e._data?.uncompressedSize ?? 0,
+        sha256: "local-scan" // placeholder to keep UI compatible
+      }))
+      .sort((a, b) => b.size_bytes - a.size_bytes);
+
+    // Hosting checks (based on what we saw)
+    const hosting_checks: { check: string; severity: "info" | "medium" | "high" }[] = [];
+
+    if (brotli_present) {
+      hosting_checks.push({
+        check: "Brotli assets detected (.br). Your host must send Content-Encoding: br for those files.",
+        severity: "high"
+      });
+    }
+    if (gzip_present) {
+      hosting_checks.push({
+        check: "Gzip assets detected (.gz). Your host must send Content-Encoding: gzip for those files.",
+        severity: "medium"
+      });
+    }
+
+    hosting_checks.push({
+      check: "Ensure .wasm is served with MIME type: application/wasm",
+      severity: "high"
+    });
+
+    hosting_checks.push({
+      check: "Set long cache headers for immutable build files (Build/*.data, *.wasm, *.js) to improve load speed.",
+      severity: "info"
+    });
+
+    const data: ScanResponse = {
+      kind: "webgl_build_scan",
+      quick_score,
+      compression: { brotli_present, gzip_present },
+      memory_settings_detected_bytes,
+      files: files.slice(0, 200), // keep UI responsive
+      hosting_checks,
+      scanned_at: new Date().toISOString()
+    };
+
+    setResp(data);
+  } catch (e: any) {
+    setErr(e?.message || "Scan failed");
+  } finally {
+    setBusy(false);
   }
+}
+
 
   return (
     <div>
