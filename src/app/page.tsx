@@ -2,22 +2,21 @@
 
 import React, { useMemo, useState } from "react";
 import JSZip from "jszip";
-
-type ScanResponse = {
-  kind: string;
-  quick_score: number;
-  compression?: { brotli_present: boolean; gzip_present: boolean };
-  memory_settings_detected_bytes?: number[];
-  files?: { name: string; size_bytes: number; sha256: string }[];
-  hosting_checks?: { check: string; severity: "info" | "medium" | "high" }[];
-  scanned_at?: string;
-};
+import { generateFixPack, type ScanResponse } from "@/lib/fixpack/generateFixPack";
 
 export default function HomePage() {
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [resp, setResp] = useState<ScanResponse | null>(null);
+
+  // Usage-based free fix packs (3 free ZIP downloads, stored locally for now)
+  const FREE_FIXPACKS = 3;
+  const FIXPACK_KEY = "unity_html5_free_fixpacks_used_v1";
+  const usedFixpacks = typeof window !== "undefined"
+    ? Number(window.localStorage.getItem(FIXPACK_KEY) || "0")
+    : 0;
+  const remainingFixpacks = Math.max(0, FREE_FIXPACKS - usedFixpacks);
 
   const humanMem = useMemo(() => {
     if (!resp?.memory_settings_detected_bytes?.length) return null;
@@ -39,28 +38,22 @@ export default function HomePage() {
 
       // Collect file entries (exclude directories)
       const entries = Object.values(zip.files).filter((z) => !z.dir);
-
       const lower = (s: string) => s.toLowerCase();
+
       const brotli_present = entries.some((e) => lower(e.name).endsWith(".br"));
       const gzip_present = entries.some((e) => lower(e.name).endsWith(".gz"));
 
-      // Detect loader files (Unity build names vary)
+      // Detect loader files
       const loaderFiles = entries
         .filter((e) => lower(e.name).endsWith(".js"))
         .filter((e) => lower(e.name).includes("loader"));
 
-      // Memory hints: best-effort regex scan in loader js
+      // Memory hints: best-effort scan loader js
       let memory_settings_detected_bytes: number[] = [];
 
       for (const lf of loaderFiles.slice(0, 5)) {
         try {
           const text = await zip.file(lf.name)!.async("string");
-
-          // Common patterns:
-          // TOTAL_MEMORY: 268435456
-          // "TOTAL_MEMORY": 268435456
-          // totalMemory: 268435456
-          // memory: 268435456
           const matches = [
             ...text.matchAll(
               /(TOTAL_MEMORY|totalMemory|memory)\s*[:=]\s*(\d{7,12})/g
@@ -97,14 +90,13 @@ export default function HomePage() {
       );
       const hasLoader = loaderFiles.length > 0;
 
-      // Quick score (simple heuristic)
+      // Quick score heuristic
       let quick_score = 50;
       if (brotli_present) quick_score += 20;
       if (gzip_present) quick_score += 10;
       if (hasData && hasWasm && hasLoader) quick_score += 15;
       if (!hasWasm) quick_score -= 25;
       if (!hasLoader) quick_score -= 25;
-
       quick_score = Math.max(0, Math.min(100, quick_score));
 
       // Hosting checks
@@ -139,7 +131,7 @@ export default function HomePage() {
         severity: "info",
       });
 
-      // File size table (safe: actually read bytes, but cap to keep fast)
+      // File size table: read a limited set for speed
       const IMPORTANT_SUFFIXES = [
         ".data",
         ".data.br",
@@ -179,7 +171,7 @@ export default function HomePage() {
             return {
               name: e.name,
               size_bytes: buf.byteLength,
-              sha256: "local-scan", // placeholder to keep UI compatible
+              sha256: "local-scan",
             };
           } catch {
             return { name: e.name, size_bytes: 0, sha256: "local-scan" };
@@ -207,18 +199,83 @@ export default function HomePage() {
     }
   }
 
+  function getBrand() {
+    return {
+      productName: "Unity → HTML5 Studio",
+      website: typeof window !== "undefined" ? window.location.origin : "",
+    };
+  }
+
+  function downloadTextFile(filename: string, content: string) {
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function downloadFixPackZip() {
+    if (!resp) return;
+
+    if (remainingFixpacks <= 0) {
+      setErr("You’ve used all free Fix Pack ZIP downloads in this browser. (Copy/paste and individual files are still available.)");
+      return;
+    }
+
+    const brand = getBrand();
+    const pack = generateFixPack(resp, brand);
+
+    const zip = new JSZip();
+    const folder = zip.folder("webgl-fix-pack");
+    if (!folder) throw new Error("Could not create zip folder");
+
+    folder.file("vercel.json", pack.vercelJson);
+    folder.file("_headers", pack.netlifyHeaders);
+    folder.file("nginx.conf", pack.nginxConf);
+    folder.file(".htaccess", pack.htaccess);
+    folder.file("README.md", pack.readme);
+
+    const blob = await zip.generateAsync({ type: "blob" });
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "webgl-fix-pack.zip";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    // consume one free credit
+    const nextUsed = usedFixpacks + 1;
+    window.localStorage.setItem(FIXPACK_KEY, String(nextUsed));
+  }
+
+  async function copyToClipboard(text: string) {
+    await navigator.clipboard.writeText(text);
+  }
+
+  const fixPack = useMemo(() => {
+    if (!resp) return null;
+    return generateFixPack(resp, getBrand());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resp]);
+
   return (
     <div>
       <h1 style={{ fontSize: 34, margin: "8px 0 8px" }}>
-        Will your WebGL build host cleanly?
+        Stop WebGL hosting failures — instantly
       </h1>
       <p style={{ opacity: 0.8, lineHeight: 1.5, maxWidth: 760 }}>
-        Upload a <b>WebGL build ZIP</b>. We verify compression (Brotli/Gzip),
-        file sizes, loader hints (memory), and hosting requirements (headers +
-        MIME).
+        Upload a <b>Unity WebGL build ZIP</b>. We verify compression (Brotli/Gzip),
+        file sizes, loader hints (memory), and hosting requirements (headers + MIME).
         <br />
         <span style={{ fontSize: 12, opacity: 0.75 }}>
-          This scan runs locally in your browser—your ZIP is not uploaded.
+          Runs locally in your browser — your ZIP is not uploaded.
         </span>
       </p>
 
@@ -250,6 +307,11 @@ export default function HomePage() {
         >
           {busy ? "Scanning…" : "Run Quick Scan"}
         </button>
+
+        <span style={{ fontSize: 12, opacity: 0.75 }}>
+          Fix Pack ZIP free downloads remaining (this browser): <b>{remainingFixpacks}</b>
+        </span>
+
         {err && <span style={{ color: "crimson" }}>{err}</span>}
       </div>
 
@@ -294,6 +356,81 @@ export default function HomePage() {
             ))}
           </ul>
 
+          {fixPack && (
+            <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid #eee" }}>
+              <h3 style={{ marginTop: 0 }}>Fix Pack</h3>
+
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <button
+                  onClick={downloadFixPackZip}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 10,
+                    border: "1px solid #111",
+                    background: "#111",
+                    color: "#fff",
+                    cursor: "pointer",
+                  }}
+                >
+                  📦 Download Fix Pack ZIP
+                </button>
+
+                <button
+                  onClick={() => downloadTextFile("vercel.json", fixPack.vercelJson)}
+                  style={ghostBtn}
+                >
+                  Download vercel.json
+                </button>
+                <button
+                  onClick={() => downloadTextFile("_headers", fixPack.netlifyHeaders)}
+                  style={ghostBtn}
+                >
+                  Download _headers
+                </button>
+                <button
+                  onClick={() => downloadTextFile("nginx.conf", fixPack.nginxConf)}
+                  style={ghostBtn}
+                >
+                  Download nginx.conf
+                </button>
+                <button
+                  onClick={() => downloadTextFile(".htaccess", fixPack.htaccess)}
+                  style={ghostBtn}
+                >
+                  Download .htaccess
+                </button>
+              </div>
+
+              <div style={{ marginTop: 14 }}>
+                <ConfigBlock
+                  title="Vercel (vercel.json)"
+                  content={fixPack.vercelJson}
+                  onCopy={() => copyToClipboard(fixPack.vercelJson)}
+                />
+                <ConfigBlock
+                  title="Netlify (_headers)"
+                  content={fixPack.netlifyHeaders}
+                  onCopy={() => copyToClipboard(fixPack.netlifyHeaders)}
+                />
+                <ConfigBlock
+                  title="Nginx (nginx.conf snippet)"
+                  content={fixPack.nginxConf}
+                  onCopy={() => copyToClipboard(fixPack.nginxConf)}
+                />
+                <ConfigBlock
+                  title="Apache (.htaccess)"
+                  content={fixPack.htaccess}
+                  onCopy={() => copyToClipboard(fixPack.htaccess)}
+                />
+                <ConfigBlock
+                  title="README.md"
+                  content={fixPack.readme}
+                  onCopy={() => copyToClipboard(fixPack.readme)}
+                />
+              </div>
+            </div>
+          )}
+
           <details style={{ marginTop: 10 }}>
             <summary style={{ cursor: "pointer" }}>View file sizes</summary>
             <div style={{ marginTop: 10, overflowX: "auto" }}>
@@ -323,6 +460,47 @@ export default function HomePage() {
   );
 }
 
+function ConfigBlock({
+  title,
+  content,
+  onCopy,
+}: {
+  title: string;
+  content: string;
+  onCopy: () => void;
+}) {
+  return (
+    <details style={{ marginTop: 10, border: "1px solid #eee", borderRadius: 12, padding: 10 }}>
+      <summary style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <span style={{ fontWeight: 700 }}>{title}</span>
+        <button
+          onClick={(e) => {
+            e.preventDefault();
+            onCopy();
+          }}
+          style={ghostBtn}
+        >
+          Copy
+        </button>
+      </summary>
+      <pre
+        style={{
+          marginTop: 10,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          background: "#fafafa",
+          borderRadius: 10,
+          padding: 12,
+          fontSize: 12,
+          overflowX: "auto",
+        }}
+      >
+        {content}
+      </pre>
+    </details>
+  );
+}
+
 function Kpi({ label, value }: { label: string; value: string }) {
   return (
     <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, minWidth: 160 }}>
@@ -331,6 +509,15 @@ function Kpi({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
+const ghostBtn: React.CSSProperties = {
+  padding: "10px 12px",
+  borderRadius: 10,
+  border: "1px solid #ddd",
+  background: "#fff",
+  cursor: "pointer",
+  fontSize: 13,
+};
 
 const th: React.CSSProperties = {
   textAlign: "left",
