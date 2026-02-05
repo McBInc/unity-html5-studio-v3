@@ -455,7 +455,10 @@ export default function HomePage() {
               <li>Press <b>F12</b> to open DevTools</li>
               <li>Go to the <b>Network</b> tab</li>
               <li>Reload the page</li>
-              <li>Click the file ending in <b>.wasm.br</b> (or <b>.wasm.gz</b> if you used gzip)</li>
+              <li>
+  Click the file ending in <b>.wasm.br</b>, <b>.wasm.gz</b>, or <b>.wasm</b> (if your build is not precompressed)
+</li>
+
               <li>Open <b>Headers → Response Headers</b></li>
             </ol>
 
@@ -479,9 +482,11 @@ export default function HomePage() {
             </div>
 
             <p style={{ marginTop: 10, fontSize: 13, opacity: 0.85 }}>
-              If any of these are missing, the host isn’t applying the Fix Pack correctly.
-              Re-check the generated config file for your host and redeploy.
-            </p>
+  If these headers are wrong, Unity often fails with a black screen or “Unexpected token” errors.
+  For <b>.br</b>/<b>.gz</b> files, missing <b>Content-Encoding</b> means the browser can’t decode the file.
+  Re-check the generated config for your host and redeploy.
+</p>
+
           </div>
 
           <details style={{ marginTop: 10 }}>
