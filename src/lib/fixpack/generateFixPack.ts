@@ -18,7 +18,7 @@ export type FixPack = {
 
 type Brand = {
   productName: string; // e.g. "Unity → HTML5 Studio"
-  website: string;     // e.g. "https://yourdomain.com" (can be your Vercel URL for now)
+  website: string;     // e.g. "https://yourdomain.com"
 };
 
 export function generateFixPack(scan: ScanResponse, brand: Brand): FixPack {
@@ -35,66 +35,94 @@ export function generateFixPack(scan: ScanResponse, brand: Brand): FixPack {
 }
 
 /**
- * Vercel notes:
- * - Unity often references precompressed assets like *.wasm.br, *.data.br, *.js.br
- * - Vercel must send Content-Encoding and correct Content-Type for these.
- * - Also recommend caching Build/* strongly, and not caching index.html.
+ * Great-by-default Vercel headers for Unity WebGL builds.
  *
- * Keep JSON strictly valid (no comments).
+ * Improvements included:
+ * - Explicit rules for *.wasm.br and *.wasm.gz that include BOTH Content-Type and Content-Encoding
+ * - Add Vary: Accept-Encoding wherever Content-Encoding is set (prevents cache/proxy confusion)
+ * - No-cache for / AND /index.html (entrypoint commonly cached incorrectly)
  */
 function generateVercelJson(opts: { brotli: boolean; gzip: boolean }): string {
   const headers: any[] = [];
 
-  // Cache: Build artifacts
+  // 1) Cache build artifacts aggressively (Unity build folder)
   headers.push({
     source: "/Build/(.*)",
     headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
   });
 
-  // Index should not be aggressively cached
+  // 2) Do not aggressively cache entrypoint
   headers.push({
     source: "/",
     headers: [{ key: "Cache-Control", value: "no-cache" }],
   });
+  headers.push({
+    source: "/index.html",
+    headers: [{ key: "Cache-Control", value: "no-cache" }],
+  });
 
-  // wasm MIME (both plain and precompressed)
+  // 3) wasm MIME (plain)
   headers.push({
     source: "/(.*)\\.wasm",
     headers: [{ key: "Content-Type", value: "application/wasm" }],
   });
-  headers.push({
-    source: "/(.*)\\.wasm\\.(br|gz)",
-    headers: [{ key: "Content-Type", value: "application/wasm" }],
-  });
 
-  // Brotli
+  // 4) wasm precompressed (explicit, includes encoding + vary)
   if (opts.brotli) {
-    // Apply encoding for *.br
+    headers.push({
+      source: "/(.*)\\.wasm\\.br",
+      headers: [
+        { key: "Content-Type", value: "application/wasm" },
+        { key: "Content-Encoding", value: "br" },
+        { key: "Vary", value: "Accept-Encoding" },
+      ],
+    });
+  }
+
+  if (opts.gzip) {
+    headers.push({
+      source: "/(.*)\\.wasm\\.gz",
+      headers: [
+        { key: "Content-Type", value: "application/wasm" },
+        { key: "Content-Encoding", value: "gzip" },
+        { key: "Vary", value: "Accept-Encoding" },
+      ],
+    });
+  }
+
+  // 5) General Brotli for *.br (encoding + vary)
+  if (opts.brotli) {
     headers.push({
       source: "/(.*)\\.br",
-      headers: [{ key: "Content-Encoding", value: "br" }],
+      headers: [
+        { key: "Content-Encoding", value: "br" },
+        { key: "Vary", value: "Accept-Encoding" },
+      ],
     });
 
-    // Better content types for common Unity artifacts
+    // Content types for common Unity artifacts
     headers.push({
       source: "/(.*)\\.js\\.br",
       headers: [{ key: "Content-Type", value: "application/javascript; charset=utf-8" }],
     });
     headers.push({
-      source: "/(.*)\\.data\\.br",
-      headers: [{ key: "Content-Type", value: "application/octet-stream" }],
-    });
-    headers.push({
       source: "/(.*)\\.json\\.br",
       headers: [{ key: "Content-Type", value: "application/json; charset=utf-8" }],
     });
+    headers.push({
+      source: "/(.*)\\.data\\.br",
+      headers: [{ key: "Content-Type", value: "application/octet-stream" }],
+    });
   }
 
-  // Gzip
+  // 6) General Gzip for *.gz (encoding + vary)
   if (opts.gzip) {
     headers.push({
       source: "/(.*)\\.gz",
-      headers: [{ key: "Content-Encoding", value: "gzip" }],
+      headers: [
+        { key: "Content-Encoding", value: "gzip" },
+        { key: "Vary", value: "Accept-Encoding" },
+      ],
     });
 
     headers.push({
@@ -102,17 +130,16 @@ function generateVercelJson(opts: { brotli: boolean; gzip: boolean }): string {
       headers: [{ key: "Content-Type", value: "application/javascript; charset=utf-8" }],
     });
     headers.push({
-      source: "/(.*)\\.data\\.gz",
-      headers: [{ key: "Content-Type", value: "application/octet-stream" }],
-    });
-    headers.push({
       source: "/(.*)\\.json\\.gz",
       headers: [{ key: "Content-Type", value: "application/json; charset=utf-8" }],
     });
+    headers.push({
+      source: "/(.*)\\.data\\.gz",
+      headers: [{ key: "Content-Type", value: "application/octet-stream" }],
+    });
   }
 
-  const out = { headers };
-  return JSON.stringify(out, null, 2);
+  return JSON.stringify({ headers }, null, 2);
 }
 
 function generateNetlifyHeaders(opts: { brotli: boolean; gzip: boolean; brand: Brand }): string {
@@ -121,41 +148,52 @@ function generateNetlifyHeaders(opts: { brotli: boolean; gzip: boolean; brand: B
   lines.push(`# ${opts.brand.website}`);
   lines.push("");
 
-  // Cache Build folder aggressively (Unity typically places big files there)
+  // Cache build folder strongly
   lines.push(`/Build/*`);
   lines.push(`  Cache-Control: public, max-age=31536000, immutable`);
   lines.push("");
 
-  // Don't cache entry html too aggressively
+  // Don't cache entrypoint aggressively
   lines.push(`/`);
   lines.push(`  Cache-Control: no-cache`);
   lines.push("");
+  lines.push(`/index.html`);
+  lines.push(`  Cache-Control: no-cache`);
+  lines.push("");
 
-  // wasm mime
+  // wasm mime (plain + precompressed)
   lines.push(`/*.wasm`);
   lines.push(`  Content-Type: application/wasm`);
   lines.push("");
 
-  // Precompressed wasm
-  lines.push(`/*.wasm.br`);
-  lines.push(`  Content-Type: application/wasm`);
-  if (opts.brotli) lines.push(`  Content-Encoding: br`);
-  lines.push("");
+  if (opts.brotli) {
+    lines.push(`/*.wasm.br`);
+    lines.push(`  Content-Type: application/wasm`);
+    lines.push(`  Content-Encoding: br`);
+    lines.push(`  Vary: Accept-Encoding`);
+    lines.push("");
+  }
 
-  lines.push(`/*.wasm.gz`);
-  lines.push(`  Content-Type: application/wasm`);
-  if (opts.gzip) lines.push(`  Content-Encoding: gzip`);
-  lines.push("");
+  if (opts.gzip) {
+    lines.push(`/*.wasm.gz`);
+    lines.push(`  Content-Type: application/wasm`);
+    lines.push(`  Content-Encoding: gzip`);
+    lines.push(`  Vary: Accept-Encoding`);
+    lines.push("");
+  }
 
+  // General encodings
   if (opts.brotli) {
     lines.push(`/*.br`);
     lines.push(`  Content-Encoding: br`);
+    lines.push(`  Vary: Accept-Encoding`);
     lines.push("");
   }
 
   if (opts.gzip) {
     lines.push(`/*.gz`);
     lines.push(`  Content-Encoding: gzip`);
+    lines.push(`  Vary: Accept-Encoding`);
     lines.push("");
   }
 
@@ -173,6 +211,7 @@ function generateNginxConf(opts: { brotli: boolean; gzip: boolean; brand: Brand 
   lines.push(`server {`);
   lines.push(`  # ... your server_name / root / SSL config here ...`);
   lines.push("");
+
   lines.push(`  # wasm mime`);
   lines.push(`  types { application/wasm wasm; }`);
   lines.push("");
@@ -187,19 +226,22 @@ function generateNginxConf(opts: { brotli: boolean; gzip: boolean; brand: Brand 
   lines.push(`  location = / {`);
   lines.push(`    add_header Cache-Control "no-cache";`);
   lines.push(`  }`);
+  lines.push(`  location = /index.html {`);
+  lines.push(`    add_header Cache-Control "no-cache";`);
+  lines.push(`  }`);
   lines.push("");
 
   if (opts.brotli) {
     lines.push(`  # If you have ngx_brotli installed, consider: brotli_static on;`);
     lines.push(`  location ~* \\.br$ {`);
     lines.push(`    add_header Content-Encoding br;`);
-    lines.push(`    # Content-Type is inferred from the underlying file extension (best handled by explicit locations below).`);
+    lines.push(`    add_header Vary "Accept-Encoding";`);
     lines.push(`  }`);
     lines.push("");
-    lines.push(`  location ~* \\.wasm\\.br$ { add_header Content-Type application/wasm; add_header Content-Encoding br; }`);
-    lines.push(`  location ~* \\.js\\.br$   { add_header Content-Type application/javascript; add_header Content-Encoding br; }`);
-    lines.push(`  location ~* \\.json\\.br$ { add_header Content-Type application/json; add_header Content-Encoding br; }`);
-    lines.push(`  location ~* \\.data\\.br$ { add_header Content-Type application/octet-stream; add_header Content-Encoding br; }`);
+    lines.push(`  location ~* \\.wasm\\.br$ { add_header Content-Type application/wasm; add_header Content-Encoding br; add_header Vary "Accept-Encoding"; }`);
+    lines.push(`  location ~* \\.js\\.br$   { add_header Content-Type application/javascript; add_header Content-Encoding br; add_header Vary "Accept-Encoding"; }`);
+    lines.push(`  location ~* \\.json\\.br$ { add_header Content-Type application/json; add_header Content-Encoding br; add_header Vary "Accept-Encoding"; }`);
+    lines.push(`  location ~* \\.data\\.br$ { add_header Content-Type application/octet-stream; add_header Content-Encoding br; add_header Vary "Accept-Encoding"; }`);
     lines.push("");
   }
 
@@ -207,12 +249,13 @@ function generateNginxConf(opts: { brotli: boolean; gzip: boolean; brand: Brand 
     lines.push(`  # If you have gzip_static module, consider: gzip_static on;`);
     lines.push(`  location ~* \\.gz$ {`);
     lines.push(`    add_header Content-Encoding gzip;`);
+    lines.push(`    add_header Vary "Accept-Encoding";`);
     lines.push(`  }`);
     lines.push("");
-    lines.push(`  location ~* \\.wasm\\.gz$ { add_header Content-Type application/wasm; add_header Content-Encoding gzip; }`);
-    lines.push(`  location ~* \\.js\\.gz$   { add_header Content-Type application/javascript; add_header Content-Encoding gzip; }`);
-    lines.push(`  location ~* \\.json\\.gz$ { add_header Content-Type application/json; add_header Content-Encoding gzip; }`);
-    lines.push(`  location ~* \\.data\\.gz$ { add_header Content-Type application/octet-stream; add_header Content-Encoding gzip; }`);
+    lines.push(`  location ~* \\.wasm\\.gz$ { add_header Content-Type application/wasm; add_header Content-Encoding gzip; add_header Vary "Accept-Encoding"; }`);
+    lines.push(`  location ~* \\.js\\.gz$   { add_header Content-Type application/javascript; add_header Content-Encoding gzip; add_header Vary "Accept-Encoding"; }`);
+    lines.push(`  location ~* \\.json\\.gz$ { add_header Content-Type application/json; add_header Content-Encoding gzip; add_header Vary "Accept-Encoding"; }`);
+    lines.push(`  location ~* \\.data\\.gz$ { add_header Content-Type application/octet-stream; add_header Content-Encoding gzip; add_header Vary "Accept-Encoding"; }`);
     lines.push("");
   }
 
@@ -231,7 +274,6 @@ function generateHtaccess(opts: { brotli: boolean; gzip: boolean; brand: Brand }
   lines.push(`# Apache/.htaccess hints for Unity WebGL hosting`);
   lines.push("");
 
-  // wasm mime
   lines.push(`# wasm mime`);
   lines.push(`AddType application/wasm .wasm`);
   lines.push(`AddType application/octet-stream .data`);
@@ -251,7 +293,8 @@ function generateHtaccess(opts: { brotli: boolean; gzip: boolean; brand: Brand }
     lines.push("");
   }
 
-  lines.push(`# Cache Build folder strongly`);
+  // Cache + entrypoint no-cache
+  lines.push(`# Cache Build folder strongly + avoid caching entrypoint`);
   lines.push(`<IfModule mod_headers.c>`);
   lines.push(`  <LocationMatch "^/Build/">`);
   lines.push(`    Header set Cache-Control "public, max-age=31536000, immutable"`);
@@ -259,6 +302,11 @@ function generateHtaccess(opts: { brotli: boolean; gzip: boolean; brand: Brand }
   lines.push(`  <LocationMatch "^/$">`);
   lines.push(`    Header set Cache-Control "no-cache"`);
   lines.push(`  </LocationMatch>`);
+  lines.push(`  <LocationMatch "^/index\\.html$">`);
+  lines.push(`    Header set Cache-Control "no-cache"`);
+  lines.push(`  </LocationMatch>`);
+  lines.push(`  # Helps proxies/CDNs treat compressed/uncompressed variants correctly`);
+  lines.push(`  Header append Vary "Accept-Encoding"`);
   lines.push(`</IfModule>`);
   lines.push("");
 
@@ -276,6 +324,7 @@ function generateReadme(opts: { brotli: boolean; gzip: boolean; scan: ScanRespon
   lines.push(`- Correct **Content-Encoding** for precompressed assets (.br / .gz)`);
   lines.push(`- Correct **MIME type** for WebAssembly (.wasm)`);
   lines.push(`- Recommended **caching** headers for /Build assets`);
+  lines.push(`- Adds **Vary: Accept-Encoding** for safer CDN/proxy caching`);
   lines.push("");
   lines.push(`## Your scan summary`);
   lines.push(`- Brotli detected: **${opts.brotli ? "Yes" : "No"}**`);
@@ -283,33 +332,30 @@ function generateReadme(opts: { brotli: boolean; gzip: boolean; scan: ScanRespon
   lines.push(`- Quick score: **${opts.scan.quick_score}/100**`);
   lines.push(`- Memory hints found: **${opts.scan.memory_settings_detected_bytes?.length ? "Yes" : "No"}**`);
   lines.push("");
-
   lines.push(`## Choose your hosting platform`);
   lines.push(`### Vercel`);
   lines.push(`1. Copy \`vercel.json\` into your project root`);
   lines.push(`2. Deploy`);
-  lines.push(`3. Verify that requests for *.wasm.br return headers:`);
+  lines.push(`3. Verify that requests for \`*.wasm.br\` return headers:`);
   lines.push(`   - Content-Encoding: br`);
   lines.push(`   - Content-Type: application/wasm`);
+  lines.push(`   - Vary: Accept-Encoding`);
   lines.push("");
-
   lines.push(`### Netlify`);
   lines.push(`1. Put the included \`_headers\` file in your publish directory (or repo root if it’s your publish dir).`);
   lines.push(`2. Deploy`);
   lines.push("");
-
   lines.push(`### Nginx`);
   lines.push(`1. Merge rules from \`nginx.conf\` into your server block`);
   lines.push(`2. Reload nginx`);
   lines.push("");
-
   lines.push(`### Apache`);
   lines.push(`1. Place \`.htaccess\` in the web root (same folder as index.html)`);
   lines.push("");
-
   lines.push(`## Troubleshooting`);
   lines.push(`- If your build loads locally but fails online, it’s usually **encoding** or **wasm MIME**.`);
   lines.push(`- If you see errors like "Unexpected token" on .wasm/.data, headers are likely wrong.`);
+  lines.push(`- If a CDN/proxy behaves oddly, ensure **Vary: Accept-Encoding** is present for compressed assets.`);
   lines.push(`- If load is slow, ensure /Build files are cached with "immutable".`);
   lines.push("");
 
