@@ -431,6 +431,59 @@ export default function HomePage() {
             </div>
           )}
 
+        {/* ✅ Step 1: Verify Your Headers (prevents most support issues) */}
+          <div
+            style={{
+              marginTop: 20,
+              padding: 16,
+              border: "1px solid #e5e7eb",
+              borderRadius: 12,
+              background: "#fafafa",
+            }}
+          >
+            <h3 style={{ marginBottom: 8, fontWeight: 700 }}>
+              ✅ Step 1: Verify Your Headers (Recommended)
+            </h3>
+
+            <p style={{ fontSize: 14, lineHeight: 1.6, maxWidth: 760 }}>
+              After deploying with the Fix Pack, confirm your server is sending the correct
+              headers. This prevents most Unity WebGL loading errors.
+            </p>
+
+            <ol style={{ marginTop: 10, paddingLeft: 20, lineHeight: 1.7 }}>
+              <li>Open your deployed game in <b>Chrome</b></li>
+              <li>Press <b>F12</b> to open DevTools</li>
+              <li>Go to the <b>Network</b> tab</li>
+              <li>Reload the page</li>
+              <li>Click the file ending in <b>.wasm.br</b> (or <b>.wasm.gz</b> if you used gzip)</li>
+              <li>Open <b>Headers → Response Headers</b></li>
+            </ol>
+
+            <div
+              style={{
+                marginTop: 12,
+                padding: 12,
+                background: "#111",
+                color: "#fff",
+                borderRadius: 8,
+                fontSize: 13,
+              }}
+            >
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                You should see:
+              </div>
+
+              <div>content-encoding: <b>br</b></div>
+              <div>content-type: <b>application/wasm</b></div>
+              <div>vary: <b>Accept-Encoding</b></div>
+            </div>
+
+            <p style={{ marginTop: 10, fontSize: 13, opacity: 0.85 }}>
+              If any of these are missing, the host isn’t applying the Fix Pack correctly.
+              Re-check the generated config file for your host and redeploy.
+            </p>
+          </div>
+
           <details style={{ marginTop: 10 }}>
             <summary style={{ cursor: "pointer" }}>View file sizes</summary>
             <div style={{ marginTop: 10, overflowX: "auto" }}>
