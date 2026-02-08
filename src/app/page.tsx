@@ -278,6 +278,7 @@ export default function HomePage() {
           Runs locally in your browser — your ZIP is not uploaded.
         </span>
       </p>
+          <JourneySection />
 
       <div
         style={{
@@ -345,19 +346,22 @@ export default function HomePage() {
           </div>
 
           <h3 style={{ marginTop: 18, marginBottom: 8 }}>Hosting checks</h3>
-          <ul style={{ marginTop: 0, lineHeight: 1.6 }}>
-            {resp.hosting_checks?.map((c, i) => (
-              <li key={i}>
-                <b style={{ textTransform: "uppercase", fontSize: 11, opacity: 0.75 }}>
-                  {c.severity}
-                </b>{" "}
-                {c.check}
-              </li>
-            ))}
-          </ul>
+<ul style={{ marginTop: 0, lineHeight: 1.6 }}>
+  {resp.hosting_checks?.map((c, i) => (
+    <li key={i}>
+      <b style={{ textTransform: "uppercase", fontSize: 11, opacity: 0.75 }}>
+        {c.severity}
+      </b>{" "}
+      {c.check}
+    </li>
+  ))}
+</ul>
 
-          {fixPack && (
-            <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid #eee" }}>
+{/* 👑 Launch CTA */}
+<PostScanLaunchCTA />
+
+{fixPack && (
+  <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid #eee" }}>
               <h3 style={{ marginTop: 0 }}>Fix Pack</h3>
 
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
@@ -564,6 +568,112 @@ function Kpi({ label, value }: { label: string; value: string }) {
     <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, minWidth: 160 }}>
       <div style={{ fontSize: 12, opacity: 0.7 }}>{label}</div>
       <div style={{ fontWeight: 800, fontSize: 18 }}>{value}</div>
+    </div>
+  );
+}
+
+function JourneySection() {
+  return (
+    <div style={{ marginTop: 18, padding: 16, border: "1px solid #eee", borderRadius: 14 }}>
+      <h2 style={{ marginTop: 0, marginBottom: 8 }}>From First Build to Real Launch — We’ve Got You</h2>
+      <p style={{ opacity: 0.85, lineHeight: 1.6, maxWidth: 820, marginTop: 0 }}>
+        Every successful Unity game goes through multiple deployments before it works perfectly online —
+        testing, fixing, optimizing, launching, and updating. Unity → HTML5 Studio becomes your deployment system for every release.
+      </p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10, marginTop: 12 }}>
+        <div style={{ border: "1px solid #f0f0f0", borderRadius: 12, padding: 12 }}>
+          <div style={{ fontWeight: 800 }}>1) Test your build</div>
+          <div style={{ opacity: 0.85, marginTop: 6, lineHeight: 1.5 }}>
+            Upload your WebGL export and instantly see if it’s web-ready.
+          </div>
+        </div>
+
+        <div style={{ border: "1px solid #f0f0f0", borderRadius: 12, padding: 12 }}>
+          <div style={{ fontWeight: 800 }}>2) Fix hosting issues</div>
+          <div style={{ opacity: 0.85, marginTop: 6, lineHeight: 1.5 }}>
+            Get the right config for Vercel, Netlify, Apache, Nginx, and more.
+          </div>
+        </div>
+
+        <div style={{ border: "1px solid #f0f0f0", borderRadius: 12, padding: 12 }}>
+          <div style={{ fontWeight: 800 }}>3) Launch with confidence</div>
+          <div style={{ opacity: 0.85, marginTop: 6, lineHeight: 1.5 }}>
+            Deploy knowing your game will load correctly for real players.
+          </div>
+        </div>
+
+        <div style={{ border: "1px solid #f0f0f0", borderRadius: 12, padding: 12 }}>
+          <div style={{ fontWeight: 800 }}>4) Grow & update safely</div>
+          <div style={{ opacity: 0.85, marginTop: 6, lineHeight: 1.5 }}>
+            Use the same workflow for every update — no re-learning, no guessing.
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 12, fontSize: 12, opacity: 0.75 }}>
+        One system. Every release. <b>The Deployment Launch Kings.</b>
+      </div>
+    </div>
+  );
+}
+
+function PostScanLaunchCTA(props: {
+  proPriceText?: string;
+  onGoPro?: () => void;
+}) {
+  const proPriceText = props.proPriceText || "$19/month — cancel anytime";
+
+  return (
+    <div style={{ marginTop: 18, padding: 16, border: "1px solid #e5e7eb", borderRadius: 14, background: "#fafafa" }}>
+      <h3 style={{ marginTop: 0, marginBottom: 8 }}>👑 Your launch starts here</h3>
+
+      <p style={{ marginTop: 0, opacity: 0.9, lineHeight: 1.6, maxWidth: 820 }}>
+        You’ve put real time and heart into this game — late nights, breakthroughs, frustration, and wins.
+        Now it becomes an asset: a live, shareable game on the web.
+      </p>
+
+      <div style={{ marginTop: 10, padding: 12, borderRadius: 12, border: "1px solid #eee", background: "#fff" }}>
+        <div style={{ fontWeight: 800 }}>Protect your launch</div>
+        <div style={{ marginTop: 6, opacity: 0.9, lineHeight: 1.6 }}>
+          Most Unity WebGL “it works locally” failures come from hosting configuration. Pro unlocks the Deployment Kit workflow
+          so every release is configured, repeatable, and verifiable.
+        </div>
+
+        <ul style={{ marginTop: 10, marginBottom: 0, paddingLeft: 18, lineHeight: 1.7 }}>
+          <li>Verified hosting configs (Vercel, Netlify, Apache, Nginx, + more)</li>
+          <li>Unlimited Deployment Kit downloads (Fix Packs)</li>
+          <li>Step-by-step deployment guidance + verification checklist</li>
+          <li>Optional proof/verification badge (coming as we polish Phase 2)</li>
+        </ul>
+      </div>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 12 }}>
+        <button
+          onClick={() => (props.onGoPro ? props.onGoPro() : (window.location.href = "/pricing"))}
+          style={{
+            padding: "10px 14px",
+            borderRadius: 10,
+            border: "1px solid #111",
+            background: "#111",
+            color: "#fff",
+            cursor: "pointer",
+            fontWeight: 800,
+          }}
+        >
+          🚀 Launch with confidence
+        </button>
+
+        <div style={{ fontSize: 12, opacity: 0.75 }}>{proPriceText}</div>
+
+        <a href="/pricing" style={ghostBtn}>
+          See pricing
+        </a>
+      </div>
+
+      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+        Not ready? You can continue with the limited free path (manual copy/paste + trial ZIP downloads).
+      </div>
     </div>
   );
 }
