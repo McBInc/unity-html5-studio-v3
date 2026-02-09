@@ -5,10 +5,22 @@
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
 
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
 }
+
+model Entitlement {
+  id               String   @id @default(cuid())
+  email            String?  @unique
+  stripeCustomerId String?  @unique
+  stripeSubId      String?  @unique
+  plan             String   @default("free")
+  status           String   @default("inactive")
+  expiresAt        DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
