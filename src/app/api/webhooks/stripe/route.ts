@@ -4,10 +4,7 @@ import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs"; // important for Stripe + raw body
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  // If this causes a TS error, remove apiVersion
-  apiVersion: "2025-01-27.acacia",
-});
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 
 export async function POST(req: Request) {
   const sig = req.headers.get("stripe-signature");
