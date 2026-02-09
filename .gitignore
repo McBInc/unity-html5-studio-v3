@@ -2,3 +2,11 @@ node_modules
 .next
 .env.local
 .DS_Store
+
+.vercel
+
+/generated/prisma
+# Environment variables
+.env
+.env.local
+.env.*.local
