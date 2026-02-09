@@ -53,7 +53,7 @@ export default function PricingPage() {
       <div style={{ display: "grid", gap: 14, marginTop: 18 }}>
         <PlanCard
           title="Indie"
-          price="$19/month"
+          price="$19.95/month"
           subtitle="Unlimited Fix Packs + launch checklist"
           bullets={[
             "Unlimited Deployment Kits (Fix Packs)",
@@ -68,7 +68,7 @@ export default function PricingPage() {
 
         <PlanCard
           title="Launch Pass"
-          price="$49 (or your chosen price)"
+          price="$39.95 (or your chosen price)"
           subtitle="One focused launch cycle (great if you’re near release)"
           bullets={[
             "Deployment Kit download access",
