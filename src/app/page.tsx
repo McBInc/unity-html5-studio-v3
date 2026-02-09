@@ -624,59 +624,162 @@ function PostScanLaunchCTA(props: {
 }) {
   const proPriceText = props.proPriceText || "$19/month — cancel anytime";
 
+  // Read entitlement from localStorage (set on /success)
+  const ent =
+    typeof window !== "undefined"
+      ? (() => {
+          try {
+            return JSON.parse(
+              localStorage.getItem("unity_html5_entitlement_v1") || "null"
+            ) as null | { plan?: string; gameName?: string; verifiedAt?: string };
+          } catch {
+            return null;
+          }
+        })()
+      : null;
+
+  const plan = ent?.plan || "";
+  const isPaid = plan === "pro_monthly" || plan === "launch_pass";
+
+  const planLabel =
+    plan === "pro_monthly"
+      ? "Pro (Subscription)"
+      : plan === "launch_pass"
+      ? "Launch Pass (Per Game)"
+      : null;
+
+  function goToPricing() {
+    window.location.href = "/pricing";
+  }
+
+  function goToLaunch() {
+    window.location.href = "/launch";
+  }
+
   return (
-    <div style={{ marginTop: 18, padding: 16, border: "1px solid #e5e7eb", borderRadius: 14, background: "#fafafa" }}>
+    <div
+      style={{
+        marginTop: 18,
+        padding: 16,
+        border: "1px solid #e5e7eb",
+        borderRadius: 14,
+        background: "#fafafa",
+      }}
+    >
       <h3 style={{ marginTop: 0, marginBottom: 8 }}>👑 Your launch starts here</h3>
 
       <p style={{ marginTop: 0, opacity: 0.9, lineHeight: 1.6, maxWidth: 820 }}>
-        You’ve put real time and heart into this game — late nights, breakthroughs, frustration, and wins.
-        Now it becomes an asset: a live, shareable game on the web.
+        You’ve put real time and heart into this game — late nights, breakthroughs,
+        frustration, and wins. Now it becomes an asset: a live, shareable game on the web.
       </p>
 
-      <div style={{ marginTop: 10, padding: 12, borderRadius: 12, border: "1px solid #eee", background: "#fff" }}>
-        <div style={{ fontWeight: 800 }}>Protect your launch</div>
+      <div
+        style={{
+          marginTop: 10,
+          padding: 12,
+          borderRadius: 12,
+          border: "1px solid #eee",
+          background: "#fff",
+        }}
+      >
+        <div style={{ fontWeight: 800 }}>
+          {isPaid ? "You’re protected for launch" : "Protect your launch"}
+        </div>
+
         <div style={{ marginTop: 6, opacity: 0.9, lineHeight: 1.6 }}>
-          Most Unity WebGL “it works locally” failures come from hosting configuration. Pro unlocks the Deployment Kit workflow
-          so every release is configured, repeatable, and verifiable.
+          {isPaid ? (
+            <>
+              Your deployment tools are unlocked. Follow the launch checklist to deploy and
+              verify headers so your WebGL build loads cleanly for players.
+            </>
+          ) : (
+            <>
+              Most Unity WebGL “it works locally” failures come from hosting configuration.
+              Pick the plan that matches your stage: Pro for ongoing iteration, or a Launch Pass
+              if you’re close to going live.
+            </>
+          )}
         </div>
 
         <ul style={{ marginTop: 10, marginBottom: 0, paddingLeft: 18, lineHeight: 1.7 }}>
           <li>Verified hosting configs (Vercel, Netlify, Apache, Nginx, + more)</li>
-          <li>Unlimited Deployment Kit downloads (Fix Packs)</li>
+          <li>{isPaid ? "Unlimited" : "Unlock"} Deployment Kit downloads (Fix Packs)</li>
           <li>Step-by-step deployment guidance + verification checklist</li>
-          <li>Optional proof/verification badge (coming as we polish Phase 2)</li>
+          <li>Fewer “it worked yesterday” support headaches</li>
         </ul>
+
+        {planLabel && (
+          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+            ✅ Plan detected: <b>{planLabel}</b>
+            {ent?.gameName ? (
+              <>
+                {" "}
+                — <span style={{ opacity: 0.8 }}>{ent.gameName}</span>
+              </>
+            ) : null}
+          </div>
+        )}
       </div>
 
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 12 }}>
-        <button
-          onClick={() => (props.onGoPro ? props.onGoPro() : (window.location.href = "/pricing"))}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "1px solid #111",
-            background: "#111",
-            color: "#fff",
-            cursor: "pointer",
-            fontWeight: 800,
-          }}
-        >
-          🚀 Launch with confidence
-        </button>
-
-        <div style={{ fontSize: 12, opacity: 0.75 }}>{proPriceText}</div>
+      <div
+        style={{
+          display: "flex",
+          gap: 10,
+          flexWrap: "wrap",
+          alignItems: "center",
+          marginTop: 12,
+        }}
+      >
+        {isPaid ? (
+          <button
+            onClick={goToLaunch}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 10,
+              border: "1px solid #111",
+              background: "#111",
+              color: "#fff",
+              fontWeight: 800,
+              cursor: "pointer",
+            }}
+          >
+            ✅ You’re covered — go to Launch checklist
+          </button>
+        ) : (
+          <button
+            onClick={props.onGoPro ? props.onGoPro : goToPricing}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 10,
+              border: "1px solid #111",
+              background: "#111",
+              color: "#fff",
+              fontWeight: 800,
+              cursor: "pointer",
+            }}
+          >
+            🚀 Choose plan & unlock ({proPriceText} or Launch Pass)
+          </button>
+        )}
 
         <a href="/pricing" style={ghostBtn}>
           See pricing
         </a>
+
+        <a href="/launch" style={ghostBtn}>
+          Launch guide
+        </a>
       </div>
 
-      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-        Not ready? You can continue with the limited free path (manual copy/paste + trial ZIP downloads).
-      </div>
+      {!isPaid && (
+        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+          Not ready? You can continue with the limited free path (manual copy/paste + trial ZIP downloads).
+        </div>
+      )}
     </div>
   );
 }
+
 
 const ghostBtn: React.CSSProperties = {
   padding: "10px 12px",
