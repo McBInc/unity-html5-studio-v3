@@ -1,9 +1,11 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../generated/prisma";
 import { PrismaNeon } from "@prisma/adapter-neon";
-import { neon } from "@neondatabase/serverless";
 
-const connectionString = process.env.DATABASE_URL!;
-const sql = neon(connectionString);
-const adapter = new PrismaNeon(sql);
+const adapter = new PrismaNeon({
+  connectionString: process.env.DATABASE_URL!,
+});
 
 export const prisma = new PrismaClient({ adapter });
+
+
+
