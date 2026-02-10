@@ -3,38 +3,63 @@ import Stripe from "stripe";
 
 export const runtime = "nodejs";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+if (!stripeSecretKey) {
+  throw new Error("Missing env var: STRIPE_SECRET_KEY");
+}
 
-type Plan = "indie" | "launch";
+const stripe = new Stripe(stripeSecretKey);
 
-function getPriceId(plan: Plan): { priceId: string; mode: "subscription" | "payment" } {
-  if (plan === "indie") {
+type CheckoutPlan = "pro_monthly" | "launch_pass";
+
+function getSiteUrl(req: Request) {
+  // Prefer explicit env var, but fall back to the request origin (useful on preview URLs)
+  const envUrl =
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    process.env.SITE_URL ||
+    process.env.NEXT_PUBLIC_APP_URL;
+
+  if (envUrl) return envUrl.replace(/\/$/, "");
+
+  const origin = req.headers.get("origin");
+  if (origin) return origin.replace(/\/$/, "");
+
+  throw new Error("Missing site URL. Set NEXT_PUBLIC_SITE_URL in Vercel.");
+}
+
+function mapPlan(plan: CheckoutPlan) {
+  if (plan === "pro_monthly") {
     const priceId = process.env.STRIPE_PRICE_PRO_MONTHLY;
     if (!priceId) throw new Error("Missing env var: STRIPE_PRICE_PRO_MONTHLY");
-    return { priceId, mode: "subscription" };
+    return { mode: "subscription" as const, priceId };
   }
 
-  // launch
+  // launch_pass
   const priceId = process.env.STRIPE_PRICE_LAUNCH_PASS;
   if (!priceId) throw new Error("Missing env var: STRIPE_PRICE_LAUNCH_PASS");
-  return { priceId, mode: "payment" };
+  return { mode: "payment" as const, priceId };
 }
 
 export async function POST(req: Request) {
   try {
-    // 1) Read request body
     const body = await req.json().catch(() => ({}));
-    const planRaw = String(body?.plan ?? "").toLowerCase();
+    const planRaw = String(body?.plan ?? "").toLowerCase().trim();
 
-    const plan: Plan = planRaw === "launch" ? "launch" : "indie";
+    if (planRaw !== "pro_monthly" && planRaw !== "launch_pass") {
+      return NextResponse.json(
+        { error: `Invalid plan: '${planRaw}'. Expected 'pro_monthly' or 'launch_pass'.` },
+        { status: 400 }
+      );
+    }
 
-    // 2) Pick price + mode
-    const { priceId, mode } = getPriceId(plan);
+    const plan = planRaw as CheckoutPlan;
+    const { mode, priceId } = mapPlan(plan);
 
-    // 3) Validate the priceId against Stripe (this will throw if it doesn't exist)
+    // Validate the price exists in this Stripe account (gives definitive errors)
     const price = await stripe.prices.retrieve(priceId);
 
     console.log("[checkout] plan:", plan);
+    console.log("[checkout] mode:", mode);
     console.log("[checkout] using priceId:", priceId);
     console.log("[checkout] price ok:", {
       id: price.id,
@@ -45,26 +70,20 @@ export async function POST(req: Request) {
       recurring: price.recurring?.interval ?? null,
     });
 
-    // 4) Create checkout session
-    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.SITE_URL;
-    if (!siteUrl) throw new Error("Missing env var: NEXT_PUBLIC_SITE_URL (or SITE_URL)");
+    const siteUrl = getSiteUrl(req);
 
     const session = await stripe.checkout.sessions.create({
       mode,
       line_items: [{ price: priceId, quantity: 1 }],
       success_url: `${siteUrl}/launch?success=1&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${siteUrl}/pricing?canceled=1`,
-      // optional metadata (helpful later for entitlement)
       metadata: { plan },
     });
 
     return NextResponse.json({ url: session.url }, { status: 200 });
   } catch (err: any) {
-    console.error("[checkout] error:", err?.message || err);
-    return NextResponse.json(
-      { error: err?.message || "Checkout failed" },
-      { status: 400 }
-    );
+    const message = err?.message || String(err);
+    console.error("[checkout] error:", message);
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 }
-
