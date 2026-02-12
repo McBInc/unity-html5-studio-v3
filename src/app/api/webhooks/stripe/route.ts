@@ -5,155 +5,121 @@ import { prisma } from "@/lib/prisma";
 export const runtime = "nodejs";
 
 // --- Load + validate env vars at startup ---
-
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
-if (!STRIPE_SECRET_KEY) {
-  throw new Error("Missing STRIPE_SECRET_KEY env var");
-}
+if (!STRIPE_SECRET_KEY) throw new Error("Missing STRIPE_SECRET_KEY env var");
+if (!STRIPE_WEBHOOK_SECRET) throw new Error("Missing STRIPE_WEBHOOK_SECRET env var");
 
-if (!STRIPE_WEBHOOK_SECRET) {
-  throw new Error("Missing STRIPE_WEBHOOK_SECRET env var");
-}
-
-// Now TypeScript knows these are strings
 const stripe = new Stripe(STRIPE_SECRET_KEY);
 const webhookSecret: string = STRIPE_WEBHOOK_SECRET;
 
-// ------------------------------------------------
+function mapStripeSubStatus(status: Stripe.Subscription.Status): "active" | "past_due" | "canceled" {
+  if (status === "active" || status === "trialing") return "active";
+  if (status === "past_due" || status === "unpaid") return "past_due";
+  return "canceled";
+}
 
 export async function POST(req: Request) {
   console.log("[webhook] received request");
 
   const sig = req.headers.get("stripe-signature");
-
   if (!sig) {
     console.error("[webhook] missing stripe-signature header");
-
-    return NextResponse.json(
-      { error: "Missing stripe-signature" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Missing stripe-signature" }, { status: 400 });
   }
 
   let body: string;
-
   try {
     body = await req.text();
   } catch (err) {
     console.error("[webhook] failed to read body", err);
-
-    return NextResponse.json(
-      { error: "Failed to read request body" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Failed to read request body" }, { status: 400 });
   }
 
   let event: Stripe.Event;
-
-  // --- Verify signature ---
-
   try {
     event = stripe.webhooks.constructEvent(body, sig, webhookSecret);
   } catch (err: any) {
-    console.error(
-      "[webhook] signature verification failed:",
-      err?.message
-    );
-
-    return NextResponse.json(
-      { error: `Signature error: ${err?.message}` },
-      { status: 400 }
-    );
+    console.error("[webhook] signature verification failed:", err?.message);
+    return NextResponse.json({ error: `Signature error: ${err?.message}` }, { status: 400 });
   }
 
   console.log("[webhook] verified event:", event.type);
-
-  // --- Handle event ---
 
   try {
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session;
 
+        const checkoutSessionId = session.id;
+
         const email =
           session.customer_details?.email ??
-          (typeof session.customer_email === "string"
-            ? session.customer_email
-            : null);
+          (typeof session.customer_email === "string" ? session.customer_email : null);
 
-        const customerId =
-          typeof session.customer === "string" ? session.customer : null;
+        const customerId = typeof session.customer === "string" ? session.customer : null;
 
-        const subId =
-          typeof session.subscription === "string"
-            ? session.subscription
-            : null;
+        const subId = typeof session.subscription === "string" ? session.subscription : null;
 
-        const plan =
-          session.metadata?.plan ?? (subId ? "indie" : "launch");
+        const plan = session.metadata?.plan ?? (subId ? "indie" : "launch");
 
         console.log("[webhook] checkout completed:", {
+          checkoutSessionId,
           email,
           customerId,
           subId,
           plan,
         });
 
-        if (!email && !customerId) {
-          console.warn(
-            "[webhook] missing email + customerId, skipping entitlement"
-          );
+        if (!email) {
+          // In practice, we really want email for account linking.
+          // You *can* fall back to customerId, but that may delay account creation.
+          console.warn("[webhook] missing email; cannot link to User. Skipping entitlement create.");
           break;
         }
 
-        await prisma.entitlement.upsert({
-          where: email
-            ? { email }
-            : { stripeCustomerId: customerId! },
+        // 1) Find-or-create user
+        const user = await prisma.user.upsert({
+          where: { email },
+          update: {},
+          create: { email },
+        });
 
+        // 2) Idempotent create entitlement for this checkout session
+        await prisma.entitlement.upsert({
+          where: { checkoutSessionId },
           update: {
-            email: email ?? undefined,
+            userId: user.id,
+            email,
             stripeCustomerId: customerId ?? undefined,
             stripeSubId: subId ?? undefined,
             plan,
             status: "active",
           },
-
           create: {
-            email: email ?? undefined,
+            userId: user.id,
+            email,
             stripeCustomerId: customerId ?? undefined,
             stripeSubId: subId ?? undefined,
+            checkoutSessionId,
             plan,
             status: "active",
           },
         });
 
-        console.log("[webhook] entitlement saved");
-
+        console.log("[webhook] entitlement saved (idempotent by checkoutSessionId)");
         break;
       }
 
       case "customer.subscription.updated": {
         const sub = event.data.object as Stripe.Subscription;
 
-        console.log(
-          "[webhook] subscription updated:",
-          sub.id,
-          sub.status
-        );
+        console.log("[webhook] subscription updated:", sub.id, sub.status);
 
         await prisma.entitlement.updateMany({
           where: { stripeSubId: sub.id },
-          data: {
-            status:
-              sub.status === "active"
-                ? "active"
-                : sub.status === "past_due"
-                ? "past_due"
-                : "canceled",
-          },
+          data: { status: mapStripeSubStatus(sub.status) },
         });
 
         break;
@@ -177,11 +143,7 @@ export async function POST(req: Request) {
     }
   } catch (err) {
     console.error("[webhook] handler failed:", err);
-
-    return NextResponse.json(
-      { error: "Webhook handler failed" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Webhook handler failed" }, { status: 500 });
   }
 
   return NextResponse.json({ received: true });

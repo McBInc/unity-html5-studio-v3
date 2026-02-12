@@ -13,15 +13,108 @@ datasource db {
   provider = "postgresql"
 }
 
-model Entitlement {
-  id               String   @id @default(cuid())
-  email            String?  @unique
-  stripeCustomerId String?  @unique
-  stripeSubId      String?  @unique
-  plan             String   @default("free")
-  status           String   @default("inactive")
-  expiresAt        DateTime?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  entitlements Entitlement[]
+  projects     Project[]
+  builds       Build[]
 }
+
+model Entitlement {
+  id                String   @id @default(cuid())
+
+  userId            String?
+  user              User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  email             String?
+
+  stripeCustomerId  String?  @unique
+  stripeSubId       String?  @unique
+  checkoutSessionId String?  @unique
+
+  plan              String   @default("free")
+  status            String   @default("inactive")
+  expiresAt         DateTime?
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([userId])
+  @@index([email])
+}
+
+model Project {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  builds    Build[]
+
+  @@index([userId])
+}
+
+model Build {
+  id              String   @id @default(cuid())
+
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  buildNumber     Int?
+  versionLabel    String?
+  status          String   @default("scanned")
+
+  scanResult      Json?
+  uploadStorageKey String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  launchProfile   LaunchProfile?
+  fixPacks        FixPack[]
+
+  @@index([userId])
+  @@index([projectId])
+}
+
+model LaunchProfile {
+  id                 String   @id @default(cuid())
+
+  buildId             String   @unique
+  build               Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  hostProvider        String   @default("unknown")
+  destinationPlatform String   @default("unknown")
+  goal                String   @default("test")
+  monetization        String   @default("unknown")
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model FixPack {
+  id                 String   @id @default(cuid())
+
+  buildId             String
+  build               Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  hostProvider        String
+  destinationPlatform String?
+  version             String   @default("v1")
+  storageKey          String?
+
+  createdAt           DateTime @default(now())
+}
+
+
 
