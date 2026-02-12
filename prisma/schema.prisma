@@ -1,6 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
-
+//
 // Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
 
@@ -25,95 +25,103 @@ model User {
 }
 
 model Entitlement {
-  id                String   @id @default(cuid())
+  id String @id @default(cuid())
 
-  userId            String?
-  user              User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId String?
+  user   User? @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  email             String?
+  email String?
 
-  stripeCustomerId  String?  @unique
-  stripeSubId       String?  @unique
-  checkoutSessionId String?  @unique
+  stripeCustomerId  String? @unique
+  stripeSubId       String? @unique
+  checkoutSessionId String? @unique
 
-  plan              String   @default("free")
-  status            String   @default("inactive")
-  expiresAt         DateTime?
+  plan      String   @default("free")
+  status    String   @default("inactive")
+  expiresAt DateTime?
 
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([userId])
   @@index([email])
 }
 
 model Project {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   name      String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  builds    Build[]
+  builds Build[]
 
+  @@unique([userId, name])
   @@index([userId])
 }
 
 model Build {
-  id              String   @id @default(cuid())
+  id String @id @default(cuid())
 
-  userId          String
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  projectId       String
-  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-  buildNumber     Int?
-  versionLabel    String?
-  status          String   @default("scanned")
+  buildNumber  Int?
+  versionLabel String?
+  status       String @default("scanned")
 
-  scanResult      Json?
+  // Hybrid scan persistence
+  scanResult     Json?
+  scannedAt      DateTime?
+  quickScore     Int?
+  brotliPresent  Boolean?
+  gzipPresent    Boolean?
+
+  // For later (R2/S3)
   uploadStorageKey String?
 
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  launchProfile   LaunchProfile?
-  fixPacks        FixPack[]
+  launchProfile LaunchProfile?
+  fixPacks      FixPack[]
 
   @@index([userId])
   @@index([projectId])
 }
 
 model LaunchProfile {
-  id                 String   @id @default(cuid())
+  id String @id @default(cuid())
 
-  buildId             String   @unique
-  build               Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  buildId String @unique
+  build   Build  @relation(fields: [buildId], references: [id], onDelete: Cascade)
 
-  hostProvider        String   @default("unknown")
-  destinationPlatform String   @default("unknown")
-  goal                String   @default("test")
-  monetization        String   @default("unknown")
+  hostProvider        String @default("unknown")
+  destinationPlatform String @default("unknown")
+  goal                String @default("test")
+  monetization        String @default("unknown")
 
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model FixPack {
-  id                 String   @id @default(cuid())
+  id String @id @default(cuid())
 
-  buildId             String
-  build               Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  buildId String
+  build   Build @relation(fields: [buildId], references: [id], onDelete: Cascade)
 
   hostProvider        String
   destinationPlatform String?
-  version             String   @default("v1")
+  version             String @default("v1")
   storageKey          String?
 
-  createdAt           DateTime @default(now())
+  createdAt DateTime @default(now())
 }
 
 

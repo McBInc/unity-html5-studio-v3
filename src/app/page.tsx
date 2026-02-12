@@ -61,6 +61,30 @@ export default function HomePage() {
       .join(", ");
   }, [resp]);
 
+  async function persistScan(scan: ScanResponse) {
+    // Best-effort save. If it fails, user still gets results.
+    try {
+      const saveRes = await fetch("/api/scanbuild", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: userEmail,
+          projectName: projectName || "Untitled Game",
+          scan,
+          buildSizeMB: file ? Math.round(file.size / 1024 / 1024) : undefined,
+          source: "client",
+        }),
+      });
+
+      if (!saveRes.ok) {
+        const text = await saveRes.text();
+        console.warn("[scanbuild] persist failed:", text);
+      }
+    } catch (e) {
+      console.warn("[scanbuild] persist error:", e);
+    }
+  }
+
   async function runScan() {
     if (!file) return;
 
@@ -71,35 +95,173 @@ export default function HomePage() {
     try {
       // Until Auth.js is live, we require an email to persist builds
       if (!userEmail || !userEmail.includes("@")) {
-        setErr("Please enter the email you used at checkout so we can save your build history.");
-        setBusy(false);
-        return;
+        throw new Error(
+          "Please enter the email you used at checkout so we can save your build history."
+        );
       }
 
-      const fd = new FormData();
-      fd.append("zip", file);
-      fd.append("email", userEmail);
-      fd.append("projectName", projectName || "Untitled Game");
+      // --- Client-side scan (no ZIP upload) ---
+      const ab = await file.arrayBuffer();
+      const zip = await JSZip.loadAsync(ab);
 
-      const res = await fetch("/api/scanbuild", {
-        method: "POST",
-        body: fd,
+      // Collect file entries (exclude directories)
+      const entries = Object.values(zip.files).filter((z) => !z.dir);
+      const lower = (s: string) => s.toLowerCase();
+
+      const brotli_present = entries.some((e) => lower(e.name).endsWith(".br"));
+      const gzip_present = entries.some((e) => lower(e.name).endsWith(".gz"));
+
+      // Detect loader files
+      const loaderFiles = entries
+        .filter((e) => lower(e.name).endsWith(".js"))
+        .filter((e) => lower(e.name).includes("loader"));
+
+      // Memory hints: best-effort scan loader js
+      let memory_settings_detected_bytes: number[] = [];
+
+      for (const lf of loaderFiles.slice(0, 5)) {
+        try {
+          const text = await zip.file(lf.name)!.async("string");
+          const matches = [
+            ...text.matchAll(
+              /(TOTAL_MEMORY|totalMemory|memory)\s*[:=]\s*(\d{7,12})/g
+            ),
+          ];
+          for (const m of matches) {
+            const n = Number(m[2]);
+            if (
+              Number.isFinite(n) &&
+              n > 32 * 1024 * 1024 &&
+              n < 8 * 1024 * 1024 * 1024
+            ) {
+              memory_settings_detected_bytes.push(n);
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      memory_settings_detected_bytes = Array.from(
+        new Set(memory_settings_detected_bytes)
+      ).sort((a, b) => a - b);
+
+      // Detect key Unity build artifacts
+      const hasSuffix = (name: string, suffixes: string[]) =>
+        suffixes.some((s) => lower(name).endsWith(s));
+
+      const hasData = entries.some((e) =>
+        hasSuffix(e.name, [".data", ".data.br", ".data.gz"])
+      );
+      const hasWasm = entries.some((e) =>
+        hasSuffix(e.name, [".wasm", ".wasm.br", ".wasm.gz"])
+      );
+      const hasLoader = loaderFiles.length > 0;
+
+      // Quick score heuristic
+      let quick_score = 50;
+      if (brotli_present) quick_score += 20;
+      if (gzip_present) quick_score += 10;
+      if (hasData && hasWasm && hasLoader) quick_score += 15;
+      if (!hasWasm) quick_score -= 25;
+      if (!hasLoader) quick_score -= 25;
+      quick_score = Math.max(0, Math.min(100, quick_score));
+
+      // Hosting checks
+      const hosting_checks: {
+        check: string;
+        severity: "info" | "medium" | "high";
+      }[] = [];
+
+      if (brotli_present) {
+        hosting_checks.push({
+          check:
+            "Brotli assets detected (.br). Your host must send Content-Encoding: br for those files.",
+          severity: "high",
+        });
+      }
+      if (gzip_present) {
+        hosting_checks.push({
+          check:
+            "Gzip assets detected (.gz). Your host must send Content-Encoding: gzip for those files.",
+          severity: "medium",
+        });
+      }
+
+      hosting_checks.push({
+        check: "Ensure .wasm is served with MIME type: application/wasm",
+        severity: "high",
       });
 
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || "Scan failed");
-      }
+      hosting_checks.push({
+        check:
+          "Set long cache headers for immutable build files (Build/*.data, *.wasm, *.js) to improve load speed.",
+        severity: "info",
+      });
 
-      const data = await res.json();
+      // File size table: read a limited set for speed
+      const IMPORTANT_SUFFIXES = [
+        ".data",
+        ".data.br",
+        ".data.gz",
+        ".wasm",
+        ".wasm.br",
+        ".wasm.gz",
+        ".framework.js",
+        ".framework.js.br",
+        ".framework.js.gz",
+        ".loader.js",
+        ".loader.js.br",
+        ".loader.js.gz",
+        "index.html",
+      ];
 
-      // Expected shape from server route:
-      // { success, projectId, buildId, buildNumber, scan }
-      if (!data?.scan) {
-        throw new Error("Scan response missing 'scan' payload");
-      }
+      const isImportant = (name: string) => {
+        const n = lower(name);
+        return IMPORTANT_SUFFIXES.some((s) => n.endsWith(s)) || n.includes("build/");
+      };
 
-      setResp(data.scan as ScanResponse);
+      const targets = [
+        ...entries.filter((e) => isImportant(e.name)),
+        ...entries.filter((e) => !isImportant(e.name)).slice(0, 25),
+      ];
+
+      const uniqTargets = Array.from(
+        new Map(targets.map((t) => [t.name, t])).values()
+      );
+
+      const files = await Promise.all(
+        uniqTargets.map(async (e) => {
+          try {
+            const buf = await zip.file(e.name)!.async("arraybuffer");
+            return {
+              name: e.name,
+              size_bytes: buf.byteLength,
+              sha256: "local-scan",
+            };
+          } catch {
+            return { name: e.name, size_bytes: 0, sha256: "local-scan" };
+          }
+        })
+      );
+
+      files.sort((a, b) => b.size_bytes - a.size_bytes);
+
+      const scan: ScanResponse = {
+        kind: "webgl_build_scan",
+        quick_score,
+        compression: { brotli_present, gzip_present },
+        memory_settings_detected_bytes,
+        files,
+        hosting_checks,
+        scanned_at: new Date().toISOString(),
+      };
+
+      // Show result immediately
+      setResp(scan);
+
+      // Save to DB (best effort)
+      await persistScan(scan);
     } catch (e: any) {
       setErr(e?.message || "Scan failed");
     } finally {
@@ -186,8 +348,7 @@ export default function HomePage() {
         file sizes, loader hints (memory), and hosting requirements (headers + MIME).
         <br />
         <span style={{ fontSize: 12, opacity: 0.75 }}>
-          Your ZIP is uploaded to our server for scanning so we can save your build history.
-          (We’ll add sign-in soon so this is seamless.)
+          Runs locally in your browser — your ZIP is not uploaded. We only save the scan result to your build history.
         </span>
       </p>
 
@@ -250,7 +411,8 @@ export default function HomePage() {
         </button>
 
         <span style={{ fontSize: 12, opacity: 0.75 }}>
-          Fix Pack ZIP free downloads remaining (this browser): <b>{remainingFixpacks}</b>
+          Fix Pack ZIP free downloads remaining (this browser):{" "}
+          <b>{remainingFixpacks}</b>
         </span>
 
         {err && <span style={{ color: "crimson" }}>{err}</span>}
@@ -319,28 +481,16 @@ export default function HomePage() {
                   📦 Download Fix Pack ZIP
                 </button>
 
-                <button
-                  onClick={() => downloadTextFile("vercel.json", fixPack.vercelJson)}
-                  style={ghostBtn}
-                >
+                <button onClick={() => downloadTextFile("vercel.json", fixPack.vercelJson)} style={ghostBtn}>
                   Download vercel.json
                 </button>
-                <button
-                  onClick={() => downloadTextFile("_headers", fixPack.netlifyHeaders)}
-                  style={ghostBtn}
-                >
+                <button onClick={() => downloadTextFile("_headers", fixPack.netlifyHeaders)} style={ghostBtn}>
                   Download _headers
                 </button>
-                <button
-                  onClick={() => downloadTextFile("nginx.conf", fixPack.nginxConf)}
-                  style={ghostBtn}
-                >
+                <button onClick={() => downloadTextFile("nginx.conf", fixPack.nginxConf)} style={ghostBtn}>
                   Download nginx.conf
                 </button>
-                <button
-                  onClick={() => downloadTextFile(".htaccess", fixPack.htaccess)}
-                  style={ghostBtn}
-                >
+                <button onClick={() => downloadTextFile(".htaccess", fixPack.htaccess)} style={ghostBtn}>
                   Download .htaccess
                 </button>
               </div>
@@ -457,6 +607,8 @@ export default function HomePage() {
   );
 }
 
+/* ---------- existing components below (unchanged) ---------- */
+
 function ConfigBlock({
   title,
   content,
@@ -556,7 +708,6 @@ function JourneySection() {
 function PostScanLaunchCTA(props: { proPriceText?: string; onGoPro?: () => void }) {
   const proPriceText = props.proPriceText || "$19/month — cancel anytime";
 
-  // Read entitlement from localStorage (set on /success)
   const ent =
     typeof window !== "undefined"
       ? (() => {
@@ -716,6 +867,7 @@ const th: React.CSSProperties = {
   fontSize: 12,
   opacity: 0.8,
 };
+
 const td: React.CSSProperties = {
   borderBottom: "1px solid #f3f3f3",
   padding: "8px 6px",
