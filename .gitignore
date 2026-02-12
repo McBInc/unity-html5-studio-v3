@@ -10,3 +10,9 @@ src/generated
 .env
 .env.local
 .env.*.local
+*.mp4
+*.mov
+*.zip
+*.pdf
+echo "*.mp4" >> .gitignore
+echo "*.zip" >> .gitignore
