@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 type HistoryBuild = {
   id: string;
@@ -31,6 +31,13 @@ export default function HistoryPage() {
   const [err, setErr] = useState<string | null>(null);
   const [data, setData] = useState<HistoryResponse | null>(null);
 
+  // Prevent repeated auto-load loops
+  const lastLoadedEmailRef = useRef<string>("");
+
+  const builds = data?.builds || [];
+  const hasValidEmail = email.includes("@");
+
+  // Load saved email on first render
   useEffect(() => {
     try {
       const saved = localStorage.getItem(EMAIL_KEY) || "";
@@ -40,6 +47,7 @@ export default function HistoryPage() {
     }
   }, []);
 
+  // Persist email as user types
   useEffect(() => {
     try {
       localStorage.setItem(EMAIL_KEY, email || "");
@@ -48,29 +56,20 @@ export default function HistoryPage() {
     }
   }, [email]);
 
-  const builds = data?.builds || [];
+  async function loadHistory(forEmail?: string) {
+    const targetEmail = (forEmail ?? email).trim();
 
-  const summary = useMemo(() => {
-    if (!data?.success) return null;
-    if (!data.user) return { title: "No user found", subtitle: "Try another email." };
-    return {
-      title: data.user.email,
-      subtitle: `${builds.length} build(s) found`,
-    };
-  }, [data, builds.length]);
-
-  async function load() {
     setErr(null);
-    setData(null);
 
-    if (!email || !email.includes("@")) {
+    if (!targetEmail || !targetEmail.includes("@")) {
+      setData(null);
       setErr("Enter the email you used at checkout.");
       return;
     }
 
     setLoading(true);
     try {
-      const res = await fetch(`/api/history?email=${encodeURIComponent(email)}`, {
+      const res = await fetch(`/api/history?email=${encodeURIComponent(targetEmail)}`, {
         method: "GET",
       });
 
@@ -81,26 +80,56 @@ export default function HistoryPage() {
       }
 
       setData(json);
+      lastLoadedEmailRef.current = targetEmail;
     } catch (e: any) {
+      setData(null);
       setErr(e?.message || "Failed to load history");
     } finally {
       setLoading(false);
     }
   }
 
+  // Auto-load whenever we have a valid email that we haven’t loaded yet
   useEffect(() => {
-    // Auto-load if we already have an email saved
-    if (email && email.includes("@")) {
-      load();
-    }
+    if (!hasValidEmail) return;
+    if (loading) return;
+
+    const normalized = email.trim().toLowerCase();
+    if (!normalized) return;
+
+    if (lastLoadedEmailRef.current.toLowerCase() === normalized) return;
+
+    loadHistory(normalized);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [email]);
+
+  const summary = useMemo(() => {
+    if (!data?.success) return null;
+
+    if (!data.user) {
+      return {
+        title: "No account found for this email",
+        subtitle: "If you just ran a scan, go back and run it again with the same email.",
+      };
+    }
+
+    return {
+      title: data.user.email,
+      subtitle: `${builds.length} build(s) found`,
+    };
+  }, [data, builds.length]);
+
+  const showEmptyState =
+    !loading &&
+    !err &&
+    data?.success &&
+    (data.builds?.length ?? 0) === 0;
 
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "24px 16px" }}>
       <h1 style={{ fontSize: 28, margin: "0 0 6px" }}>Build History</h1>
       <p style={{ margin: 0, opacity: 0.8, lineHeight: 1.5 }}>
-        See every scan you’ve saved — score, compression flags, and the raw scan JSON.
+        Your saved scans — score, compression flags, and the raw scan JSON.
       </p>
 
       <div
@@ -130,17 +159,18 @@ export default function HistoryPage() {
         />
 
         <button
-          onClick={load}
-          disabled={loading}
+          onClick={() => loadHistory()}
+          disabled={loading || !hasValidEmail}
           style={{
             padding: "10px 14px",
             borderRadius: 10,
             border: "1px solid #111",
-            background: loading ? "#ddd" : "#111",
+            background: loading || !hasValidEmail ? "#ddd" : "#111",
             color: "#fff",
-            cursor: loading ? "not-allowed" : "pointer",
+            cursor: loading || !hasValidEmail ? "not-allowed" : "pointer",
             fontWeight: 800,
           }}
+          title={!hasValidEmail ? "Enter a valid email to load history" : "Load history"}
         >
           {loading ? "Loading…" : "Load history"}
         </button>
@@ -161,28 +191,78 @@ export default function HistoryPage() {
         </a>
 
         {err && <span style={{ color: "crimson" }}>{err}</span>}
+
+        {!err && loading && (
+          <span style={{ fontSize: 12, opacity: 0.75 }}>Fetching your saved builds…</span>
+        )}
       </div>
 
       {summary && (
         <div style={{ marginTop: 14 }}>
-          <div style={{ fontWeight: 800 }}>{summary.title}</div>
+          <div style={{ fontWeight: 900 }}>{summary.title}</div>
           <div style={{ fontSize: 13, opacity: 0.75 }}>{summary.subtitle}</div>
         </div>
       )}
 
-      <div style={{ marginTop: 16, display: "grid", gap: 12 }}>
-        {builds.length === 0 && data?.success && (
-          <div
-            style={{
-              padding: 14,
-              border: "1px solid #eee",
-              borderRadius: 14,
-            }}
-          >
-            No builds found for that email yet.
-          </div>
-        )}
+      {/* Friendly empty state */}
+      {showEmptyState && (
+        <div
+          style={{
+            marginTop: 18,
+            padding: 18,
+            borderRadius: 16,
+            border: "1px solid #eee",
+            background: "#fff",
+          }}
+        >
+          <div style={{ fontSize: 18, fontWeight: 900 }}>No saved builds yet</div>
+          <p style={{ marginTop: 8, marginBottom: 0, lineHeight: 1.6, opacity: 0.85, maxWidth: 760 }}>
+            Run your first scan and we’ll save it automatically so you can return later, repeat the process,
+            and keep a record of your deployment journey.
+          </p>
 
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
+            <a
+              href="/"
+              style={{
+                padding: "10px 14px",
+                borderRadius: 10,
+                border: "1px solid #111",
+                background: "#111",
+                color: "#fff",
+                fontWeight: 900,
+                textDecoration: "none",
+                display: "inline-block",
+              }}
+            >
+              ✅ Run a scan now
+            </a>
+
+            <button
+              onClick={() => loadHistory()}
+              disabled={!hasValidEmail || loading}
+              style={{
+                padding: "10px 14px",
+                borderRadius: 10,
+                border: "1px solid #ddd",
+                background: "#fff",
+                cursor: !hasValidEmail || loading ? "not-allowed" : "pointer",
+                fontWeight: 800,
+              }}
+              title={!hasValidEmail ? "Enter a valid email above" : "Try loading again"}
+            >
+              Try again
+            </button>
+          </div>
+
+          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
+            Tip: make sure you use the same email on the scan page — that’s how we link builds until sign-in is added.
+          </div>
+        </div>
+      )}
+
+      {/* Builds list */}
+      <div style={{ marginTop: 16, display: "grid", gap: 12 }}>
         {builds.map((b) => (
           <div
             key={b.id}
@@ -190,6 +270,7 @@ export default function HistoryPage() {
               padding: 14,
               border: "1px solid #eee",
               borderRadius: 14,
+              background: "#fff",
             }}
           >
             <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
@@ -203,7 +284,7 @@ export default function HistoryPage() {
               </div>
 
               <div style={{ textAlign: "right" }}>
-                <div style={{ fontWeight: 800 }}>
+                <div style={{ fontWeight: 900 }}>
                   Score: {b.quickScore ?? "—"}
                 </div>
                 <div style={{ fontSize: 12, opacity: 0.75 }}>
@@ -221,7 +302,7 @@ export default function HistoryPage() {
             </div>
 
             <details style={{ marginTop: 10 }}>
-              <summary style={{ cursor: "pointer", fontWeight: 800 }}>
+              <summary style={{ cursor: "pointer", fontWeight: 900 }}>
                 View scan JSON
               </summary>
               <pre
