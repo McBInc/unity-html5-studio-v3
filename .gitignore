@@ -16,3 +16,4 @@ src/generated
 *.pdf
 echo "*.mp4" >> .gitignore
 echo "*.zip" >> .gitignore
+*.mp4
