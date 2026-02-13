@@ -5,13 +5,14 @@ export const runtime = "nodejs";
 
 export async function GET(
   req: Request,
-  ctx: { params: Promise<{ id: string }> }
+  ctx: { params: { id: string } }
 ) {
   try {
-    const { id } = await ctx.params;
+    const id = (ctx.params?.id || "").trim();
 
     const url = new URL(req.url);
-    const email = (url.searchParams.get("email") || "").trim().toLowerCase();
+    const emailRaw = (url.searchParams.get("email") || "").trim();
+    const email = emailRaw.toLowerCase();
 
     if (!id) {
       return NextResponse.json(
@@ -27,49 +28,61 @@ export async function GET(
       );
     }
 
-    // Soft auth until Auth is implemented:
-    // Only return the build if it belongs to the user (by email).
+    // 1) Find the user first (by email)
+    const user = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true, email: true },
+    });
+
+    if (!user) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "No user found for this email",
+          debug: { email },
+        },
+        { status: 404 }
+      );
+    }
+
+    // 2) Now fetch the build by id + userId (more reliable than nested email filter)
     const build = await prisma.build.findFirst({
       where: {
         id,
-        user: { email },
+        userId: user.id,
       },
       include: {
         project: { select: { id: true, name: true } },
         launchProfile: true,
-        fixPacks: { select: { id: true, createdAt: true, hostProvider: true, destinationPlatform: true, version: true } },
+        fixPacks: {
+          select: {
+            id: true,
+            createdAt: true,
+            hostProvider: true,
+            destinationPlatform: true,
+            version: true,
+          },
+        },
       },
     });
 
     if (!build) {
       return NextResponse.json(
-        { success: false, error: "Build not found for this email" },
+        {
+          success: false,
+          error: "Build not found for this email",
+          debug: { buildId: id, email, userId: user.id },
+        },
         { status: 404 }
       );
     }
 
     return NextResponse.json({
       success: true,
-      build: {
-        id: build.id,
-        status: build.status,
-        createdAt: build.createdAt,
-        updatedAt: build.updatedAt,
-
-        scannedAt: (build as any).scannedAt ?? null,
-        quickScore: (build as any).quickScore ?? null,
-        brotliPresent: (build as any).brotliPresent ?? null,
-        gzipPresent: (build as any).gzipPresent ?? null,
-
-        scanResult: (build as any).scanResult ?? null,
-
-        project: build.project,
-        launchProfile: build.launchProfile,
-        fixPacks: build.fixPacks,
-      },
+      build,
     });
   } catch (err: any) {
-    console.error("[api/build/:id] failed:", err);
+    console.error("[api/build/[id]] failed:", err);
     return NextResponse.json(
       { success: false, error: err?.message || "Failed to load build" },
       { status: 500 }
