@@ -5,10 +5,11 @@ export const runtime = "nodejs";
 
 export async function GET(
   req: Request,
-  ctx: { params: { id: string } }
+  ctx: { params: Promise<{ id: string }> }
 ) {
   try {
-    const id = (ctx.params?.id || "").trim();
+    const { id: rawId } = await ctx.params;
+    const id = (rawId || "").trim();
 
     const url = new URL(req.url);
     const emailRaw = (url.searchParams.get("email") || "").trim();
@@ -28,7 +29,7 @@ export async function GET(
       );
     }
 
-    // 1) Find the user first (by email)
+    // 1) Resolve user by email (soft auth)
     const user = await prisma.user.findUnique({
       where: { email },
       select: { id: true, email: true },
@@ -45,7 +46,7 @@ export async function GET(
       );
     }
 
-    // 2) Now fetch the build by id + userId (more reliable than nested email filter)
+    // 2) Fetch build by id + userId (more reliable than nested email filter)
     const build = await prisma.build.findFirst({
       where: {
         id,
