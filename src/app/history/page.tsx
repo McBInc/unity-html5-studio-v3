@@ -1,346 +1,235 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 
-type HistoryBuild = {
+type BuildRow = {
   id: string;
   createdAt: string;
-  scannedAt: string | null;
-  status: string;
-  project: { id: string; name: string } | null;
-  quickScore: number | null;
-  brotliPresent: boolean | null;
-  gzipPresent: boolean | null;
-  hasLaunchProfile: boolean;
-  fixPackCount: number;
-  scanResult: any | null;
-};
-
-type HistoryResponse = {
-  success: boolean;
-  user: { id: string; email: string; createdAt: string } | null;
-  builds: HistoryBuild[];
-  error?: string;
+  quickScore: number;
+  brotliPresent: boolean;
+  gzipPresent: boolean;
+  project: {
+    name: string;
+  };
 };
 
 export default function HistoryPage() {
   const EMAIL_KEY = "unity_html5_email_v1";
 
   const [email, setEmail] = useState("");
+  const [builds, setBuilds] = useState<BuildRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [data, setData] = useState<HistoryResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loadedOnce, setLoadedOnce] = useState(false);
 
-  // Prevent repeated auto-load loops
-  const lastLoadedEmailRef = useRef<string>("");
-
-  const builds = data?.builds || [];
-  const hasValidEmail = email.includes("@");
-
-  // Load saved email on first render
+  /* Load saved email on mount */
   useEffect(() => {
     try {
       const saved = localStorage.getItem(EMAIL_KEY) || "";
-      if (saved) setEmail(saved);
+      if (saved) {
+        setEmail(saved);
+        loadHistory(saved);
+      }
     } catch {
       // ignore
     }
   }, []);
 
-  // Persist email as user types
-  useEffect(() => {
-    try {
-      localStorage.setItem(EMAIL_KEY, email || "");
-    } catch {
-      // ignore
-    }
-  }, [email]);
+  async function loadHistory(targetEmail?: string) {
+    const queryEmail = targetEmail || email;
 
-  async function loadHistory(forEmail?: string) {
-    const targetEmail = (forEmail ?? email).trim();
-
-    setErr(null);
-
-    if (!targetEmail || !targetEmail.includes("@")) {
-      setData(null);
-      setErr("Enter the email you used at checkout.");
+    if (!queryEmail || !queryEmail.includes("@")) {
+      setError("Please enter a valid email.");
       return;
     }
 
     setLoading(true);
+    setError(null);
+
     try {
-      const res = await fetch(`/api/history?email=${encodeURIComponent(targetEmail)}`, {
-        method: "GET",
-      });
+      const res = await fetch(
+        `/api/history?email=${encodeURIComponent(queryEmail)}`
+      );
 
-      const json = (await res.json()) as HistoryResponse;
-
-      if (!res.ok || !json.success) {
-        throw new Error(json?.error || "Failed to load history");
+      if (!res.ok) {
+        throw new Error("Failed to load history");
       }
 
-      setData(json);
-      lastLoadedEmailRef.current = targetEmail;
-    } catch (e: any) {
-      setData(null);
-      setErr(e?.message || "Failed to load history");
+      const data = await res.json();
+
+      setBuilds(data.builds || []);
+      setLoadedOnce(true);
+
+      try {
+        localStorage.setItem(EMAIL_KEY, queryEmail);
+      } catch {
+        // ignore
+      }
+    } catch (err: any) {
+      setError(err?.message || "Failed to load history");
     } finally {
       setLoading(false);
     }
   }
 
-  // Auto-load whenever we have a valid email that we haven’t loaded yet
-  useEffect(() => {
-    if (!hasValidEmail) return;
-    if (loading) return;
-
-    const normalized = email.trim().toLowerCase();
-    if (!normalized) return;
-
-    if (lastLoadedEmailRef.current.toLowerCase() === normalized) return;
-
-    loadHistory(normalized);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email]);
-
-  const summary = useMemo(() => {
-    if (!data?.success) return null;
-
-    if (!data.user) {
-      return {
-        title: "No account found for this email",
-        subtitle: "If you just ran a scan, go back and run it again with the same email.",
-      };
-    }
-
-    return {
-      title: data.user.email,
-      subtitle: `${builds.length} build(s) found`,
-    };
-  }, [data, builds.length]);
-
-  const showEmptyState =
-    !loading &&
-    !err &&
-    data?.success &&
-    (data.builds?.length ?? 0) === 0;
-
   return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: "24px 16px" }}>
-      <h1 style={{ fontSize: 28, margin: "0 0 6px" }}>Build History</h1>
-      <p style={{ margin: 0, opacity: 0.8, lineHeight: 1.5 }}>
-        Your saved scans — score, compression flags, and the raw scan JSON.
+    <div style={{ maxWidth: 900, margin: "0 auto", padding: "24px 16px" }}>
+      <h1 style={{ fontSize: 32, marginBottom: 8 }}>Build History</h1>
+
+      <p style={{ opacity: 0.8, marginBottom: 20 }}>
+        Your saved WebGL scans and launch readiness.
       </p>
 
+      {/* Email Input */}
       <div
         style={{
-          marginTop: 16,
           display: "flex",
           gap: 10,
           flexWrap: "wrap",
           alignItems: "center",
-          padding: 12,
-          border: "1px solid #eee",
-          borderRadius: 14,
-          background: "#fafafa",
+          marginBottom: 20,
         }}
       >
         <input
           type="email"
-          value={email}
           placeholder="Email used at checkout"
+          value={email}
           onChange={(e) => setEmail(e.target.value)}
           style={{
             padding: "10px 12px",
-            borderRadius: 10,
+            borderRadius: 8,
             border: "1px solid #ddd",
-            minWidth: 280,
+            minWidth: 260,
           }}
         />
 
         <button
           onClick={() => loadHistory()}
-          disabled={loading || !hasValidEmail}
+          disabled={loading}
           style={{
             padding: "10px 14px",
-            borderRadius: 10,
+            borderRadius: 8,
             border: "1px solid #111",
-            background: loading || !hasValidEmail ? "#ddd" : "#111",
+            background: "#111",
             color: "#fff",
-            cursor: loading || !hasValidEmail ? "not-allowed" : "pointer",
-            fontWeight: 800,
+            cursor: loading ? "not-allowed" : "pointer",
+            fontWeight: 600,
           }}
-          title={!hasValidEmail ? "Enter a valid email to load history" : "Load history"}
         >
           {loading ? "Loading…" : "Load history"}
         </button>
 
-        <a
-          href="/"
-          style={{
-            padding: "10px 12px",
-            borderRadius: 10,
-            border: "1px solid #ddd",
-            background: "#fff",
-            textDecoration: "none",
-            fontSize: 13,
-            color: "#111",
-          }}
-        >
-          ← Back to scan
-        </a>
-
-        {err && <span style={{ color: "crimson" }}>{err}</span>}
-
-        {!err && loading && (
-          <span style={{ fontSize: 12, opacity: 0.75 }}>Fetching your saved builds…</span>
-        )}
+        <Link href="/" style={{ fontSize: 13, opacity: 0.8 }}>
+          ← Run new scan
+        </Link>
       </div>
 
-      {summary && (
-        <div style={{ marginTop: 14 }}>
-          <div style={{ fontWeight: 900 }}>{summary.title}</div>
-          <div style={{ fontSize: 13, opacity: 0.75 }}>{summary.subtitle}</div>
-        </div>
+      {error && (
+        <div style={{ color: "crimson", marginBottom: 16 }}>{error}</div>
       )}
 
-      {/* Friendly empty state */}
-      {showEmptyState && (
+      {/* Loading */}
+      {loading && (
+        <div style={{ padding: 20, opacity: 0.7 }}>Loading builds…</div>
+      )}
+
+      {/* Empty State */}
+      {!loading && loadedOnce && builds.length === 0 && (
         <div
           style={{
-            marginTop: 18,
-            padding: 18,
-            borderRadius: 16,
-            border: "1px solid #eee",
-            background: "#fff",
+            marginTop: 40,
+            padding: 24,
+            border: "1px dashed #ddd",
+            borderRadius: 12,
+            textAlign: "center",
+            background: "#fafafa",
           }}
         >
-          <div style={{ fontSize: 18, fontWeight: 900 }}>No saved builds yet</div>
-          <p style={{ marginTop: 8, marginBottom: 0, lineHeight: 1.6, opacity: 0.85, maxWidth: 760 }}>
-            Run your first scan and we’ll save it automatically so you can return later, repeat the process,
-            and keep a record of your deployment journey.
+          <h3 style={{ marginBottom: 8 }}>No builds yet</h3>
+
+          <p style={{ opacity: 0.8, marginBottom: 16 }}>
+            You haven’t scanned any WebGL builds with this email.
           </p>
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
-            <a
-              href="/"
-              style={{
-                padding: "10px 14px",
-                borderRadius: 10,
-                border: "1px solid #111",
-                background: "#111",
-                color: "#fff",
-                fontWeight: 900,
-                textDecoration: "none",
-                display: "inline-block",
-              }}
-            >
-              ✅ Run a scan now
-            </a>
-
-            <button
-              onClick={() => loadHistory()}
-              disabled={!hasValidEmail || loading}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 10,
-                border: "1px solid #ddd",
-                background: "#fff",
-                cursor: !hasValidEmail || loading ? "not-allowed" : "pointer",
-                fontWeight: 800,
-              }}
-              title={!hasValidEmail ? "Enter a valid email above" : "Try loading again"}
-            >
-              Try again
-            </button>
-          </div>
-
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-            Tip: make sure you use the same email on the scan page — that’s how we link builds until sign-in is added.
-          </div>
+          <Link
+            href="/"
+            style={{
+              display: "inline-block",
+              padding: "10px 14px",
+              borderRadius: 8,
+              border: "1px solid #111",
+              background: "#111",
+              color: "#fff",
+              fontWeight: 600,
+              textDecoration: "none",
+            }}
+          >
+            🚀 Run your first scan
+          </Link>
         </div>
       )}
 
-      {/* Builds list */}
-      <div style={{ marginTop: 16, display: "grid", gap: 12 }}>
-        {builds.map((b) => (
-          <div
-            key={b.id}
-            style={{
-              padding: 14,
-              border: "1px solid #eee",
-              borderRadius: 14,
-              background: "#fff",
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-              <div>
-                <div style={{ fontWeight: 900, fontSize: 16 }}>
-                  {b.project?.name || "Untitled Game"}
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
-                  Build ID: <span style={{ fontFamily: "monospace" }}>{b.id}</span>
-                </div>
-              </div>
-
-              <div style={{ textAlign: "right" }}>
-                <div style={{ fontWeight: 900 }}>
-                  Score: {b.quickScore ?? "—"}
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  {new Date(b.createdAt).toLocaleString()}
-                </div>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-              <Badge label="Status" value={b.status} />
-              <Badge label="Brotli" value={b.brotliPresent ? "Yes" : "No"} />
-              <Badge label="Gzip" value={b.gzipPresent ? "Yes" : "No"} />
-              <Badge label="LaunchProfile" value={b.hasLaunchProfile ? "Yes" : "No"} />
-              <Badge label="FixPacks" value={String(b.fixPackCount)} />
-            </div>
-
-            <details style={{ marginTop: 10 }}>
-              <summary style={{ cursor: "pointer", fontWeight: 900 }}>
-                View scan JSON
-              </summary>
-              <pre
+      {/* Builds List */}
+      {!loading && builds.length > 0 && (
+        <div style={{ marginTop: 20 }}>
+          {builds.map((b) => (
+            <div
+              key={b.id}
+              style={{
+                padding: 16,
+                border: "1px solid #eee",
+                borderRadius: 12,
+                marginBottom: 12,
+                background: "#fff",
+              }}
+            >
+              <div
                 style={{
-                  marginTop: 10,
-                  padding: 12,
-                  borderRadius: 12,
-                  background: "#fafafa",
-                  border: "1px solid #eee",
-                  overflowX: "auto",
-                  fontSize: 12,
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  flexWrap: "wrap",
                 }}
               >
-                {JSON.stringify(b.scanResult, null, 2)}
-              </pre>
-            </details>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+                <div>
+                  <div style={{ fontWeight: 700 }}>
+                    {b.project?.name || "Untitled Project"}
+                  </div>
 
-function Badge({ label, value }: { label: string; value: string }) {
-  return (
-    <div
-      style={{
-        padding: "8px 10px",
-        borderRadius: 999,
-        border: "1px solid #eee",
-        background: "#fafafa",
-        fontSize: 12,
-      }}
-    >
-      <span style={{ opacity: 0.7 }}>{label}:</span>{" "}
-      <b>{value}</b>
+                  <div style={{ fontSize: 13, opacity: 0.7 }}>
+                    {new Date(b.createdAt).toLocaleString()}
+                  </div>
+                </div>
+
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontWeight: 700 }}>
+                    Score: {b.quickScore}/100
+                  </div>
+
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>
+                    {b.brotliPresent ? "Brotli" : "No Brotli"} ·{" "}
+                    {b.gzipPresent ? "Gzip" : "No Gzip"}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ marginTop: 10 }}>
+                <Link
+                  href={`/build/${b.id}`}
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    textDecoration: "underline",
+                  }}
+                >
+                  View build →
+                </Link>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
