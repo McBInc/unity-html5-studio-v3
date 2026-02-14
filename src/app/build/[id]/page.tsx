@@ -19,8 +19,20 @@ type ApiOk = {
 
 type ApiErr = { success: false; error: string; debug?: any };
 
-export default function BuildDetailsPage({ params }: { params: { id: string } }) {
-  const buildId = params.id;
+export default function BuildDetailsPage() {
+  // ✅ Read buildId from the URL path (most reliable in client components)
+  const [buildId, setBuildId] = useState<string>("");
+
+  useEffect(() => {
+    try {
+      const path = window.location.pathname; // e.g. /build/<id>
+      const parts = path.split("/").filter(Boolean);
+      const id = parts.length >= 2 && parts[0] === "build" ? parts[1] : "";
+      setBuildId(id);
+    } catch {
+      setBuildId("");
+    }
+  }, []);
 
   const EMAIL_KEY = "unity_html5_email_v1";
 
@@ -39,7 +51,7 @@ export default function BuildDetailsPage({ params }: { params: { id: string } })
     }
   }, []);
 
-  // Persist any edits back to localStorage
+  // Persist edits
   useEffect(() => {
     try {
       localStorage.setItem(EMAIL_KEY, email || "");
@@ -50,7 +62,7 @@ export default function BuildDetailsPage({ params }: { params: { id: string } })
 
   const apiUrl = useMemo(() => {
     const e = (email || "").trim().toLowerCase();
-    // IMPORTANT: encode email so it can’t break the URL
+    if (!buildId) return "";
     return `/api/build/${encodeURIComponent(buildId)}?email=${encodeURIComponent(e)}`;
   }, [buildId, email]);
 
@@ -58,6 +70,11 @@ export default function BuildDetailsPage({ params }: { params: { id: string } })
     const e = (email || "").trim().toLowerCase();
     setErr(null);
     setData(null);
+
+    if (!buildId) {
+      setErr("Missing build id in URL.");
+      return;
+    }
 
     if (!e || !e.includes("@")) {
       setErr("Please enter the email you used at checkout.");
@@ -67,21 +84,17 @@ export default function BuildDetailsPage({ params }: { params: { id: string } })
     setBusy(true);
     try {
       const res = await fetch(apiUrl, { method: "GET" });
-
-      // If the route itself doesn’t exist, this will usually be a plain 404.
       const text = await res.text();
-      let json: ApiOk | ApiErr | null = null;
 
+      let json: ApiOk | ApiErr | null = null;
       try {
         json = text ? (JSON.parse(text) as any) : null;
       } catch {
-        // Not JSON (often means a raw 404 page or proxy error)
+        // not JSON
       }
 
       if (!res.ok) {
-        if (json && "error" in json) {
-          throw new Error(json.error);
-        }
+        if (json && "error" in json) throw new Error(json.error);
         throw new Error(
           `Request failed (${res.status}). URL: ${apiUrl}\nResponse: ${text?.slice(0, 200) || "(empty)"}`
         );
@@ -99,15 +112,14 @@ export default function BuildDetailsPage({ params }: { params: { id: string } })
     }
   }
 
-  // Auto-load once if email is already present
+  // Auto-load when buildId becomes available and email is present
   useEffect(() => {
     const e = (email || "").trim().toLowerCase();
-    if (e && e.includes("@")) {
-      // fire and forget
+    if (buildId && e && e.includes("@")) {
       load();
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }
-  }, [buildId]); // only when buildId changes
+  }, [buildId]);
 
   function goHistory() {
     window.location.href = "/history";
@@ -122,7 +134,7 @@ export default function BuildDetailsPage({ params }: { params: { id: string } })
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
         <div>
           <h1 style={{ margin: "8px 0" }}>Build / <span style={{ opacity: 0.55 }}>Details</span></h1>
-          <div style={{ fontSize: 12, opacity: 0.7 }}>Build ID: {buildId}</div>
+          <div style={{ fontSize: 12, opacity: 0.7 }}>Build ID: {buildId || "(loading…)"}</div>
         </div>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -150,7 +162,10 @@ export default function BuildDetailsPage({ params }: { params: { id: string } })
           </button>
 
           <div style={{ fontSize: 12, opacity: 0.65 }}>
-            API: <code style={{ fontSize: 11 }}>{apiUrl}</code>
+            API:{" "}
+            <code style={{ fontSize: 11 }}>
+              {apiUrl || "(waiting for build id/email)"}
+            </code>
           </div>
         </div>
 
