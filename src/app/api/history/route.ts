@@ -1,63 +1,66 @@
+// src/app/api/history/route.ts
 import { NextResponse } from "next/server";
-import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { prisma } from "@/lib/db";
+import { getServerSession } from "next-auth/next";
+import { authOptions } from "@/lib/auth";
 
-export const runtime = "nodejs";
-
-const QuerySchema = z.object({
-  email: z.string().email(),
-});
-
-export async function GET(req: Request) {
+export async function GET() {
   try {
-    const url = new URL(req.url);
-    const email = url.searchParams.get("email") || "";
-    const { email: parsedEmail } = QuerySchema.parse({ email });
+    const session = await getServerSession(authOptions);
+    const email = session?.user?.email?.trim().toLowerCase() ?? "";
 
-    // Find the user (optional — we can still show builds even if user row missing,
-    // but in your system it should exist now)
+    if (!email) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const user = await prisma.user.findUnique({
-      where: { email: parsedEmail },
-      select: { id: true, email: true, createdAt: true },
+      where: { email },
+      select: { id: true },
     });
 
-    // Pull builds for that email via user relation.
-    // (We store userId on Build, so this is reliable.)
-    const builds = user
-      ? await prisma.build.findMany({
-          where: { userId: user.id },
-          orderBy: { createdAt: "desc" },
-          include: {
-            project: { select: { id: true, name: true } },
-            launchProfile: { select: { id: true } },
-            fixPacks: { select: { id: true } },
-          },
-          take: 200,
-        })
-      : [];
+    if (!user) {
+      return NextResponse.json({ ok: true, email, projects: [] });
+    }
 
-    return NextResponse.json({
-      success: true,
-      user,
-      builds: builds.map((b) => ({
+    const projects = await prisma.project.findMany({
+      where: { userId: user.id },
+      orderBy: { updatedAt: "desc" },
+      include: {
+        builds: {
+          orderBy: { createdAt: "desc" },
+          include: { launchProfile: true },
+        },
+      },
+    });
+
+    const shaped = projects.map((p) => ({
+      id: p.id,
+      name: p.name,
+      builds: p.builds.map((b) => ({
         id: b.id,
         createdAt: b.createdAt,
-        scannedAt: (b as any).scannedAt ?? null, // if present in schema
+        scannedAt: b.scannedAt,
+        quickScore: b.quickScore,
+        brotliPresent: b.brotliPresent,
+        gzipPresent: b.gzipPresent,
         status: b.status,
-        project: b.project,
-        quickScore: (b as any).quickScore ?? null,
-        brotliPresent: (b as any).brotliPresent ?? null,
-        gzipPresent: (b as any).gzipPresent ?? null,
-        hasLaunchProfile: !!b.launchProfile,
-        fixPackCount: b.fixPacks?.length ?? 0,
-        scanResult: b.scanResult ?? null,
+        versionLabel: b.versionLabel,
+        buildNumber: b.buildNumber,
+        launch: b.launchProfile
+          ? {
+              readinessScore: b.launchProfile.readinessScore,
+              platformFitScore: b.launchProfile.platformFitScore,
+              hostCompatibilityScore: b.launchProfile.hostCompatibilityScore,
+              targetPlatformId: b.launchProfile.targetPlatformId,
+              targetHostId: b.launchProfile.targetHostId,
+            }
+          : null,
       })),
-    });
-  } catch (err: any) {
-    console.error("[history] GET failed:", err);
-    return NextResponse.json(
-      { success: false, error: err?.message || "Failed to load history" },
-      { status: 400 }
-    );
+    }));
+
+    return NextResponse.json({ ok: true, email, projects: shaped });
+  } catch (err) {
+    console.error("/api/history error:", err);
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }
