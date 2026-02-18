@@ -1,8 +1,12 @@
+// src/app/api/scanbuild/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { prisma } from "@/lib/db";
+import { getServerSession } from "next-auth/next";
+import { authOptions } from "@/lib/auth";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const ScanSchema = z.object({
   kind: z.literal("webgl_build_scan"),
@@ -15,7 +19,6 @@ const ScanSchema = z.object({
 });
 
 const BodySchema = z.object({
-  email: z.string().email(),
   projectName: z.string().min(1),
   scan: ScanSchema,
 
@@ -26,14 +29,22 @@ const BodySchema = z.object({
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const { email, projectName, scan } = BodySchema.parse(body);
+    // ✅ session-locked
+    const session = await getServerSession(authOptions);
+    const email = session?.user?.email?.trim().toLowerCase() ?? "";
+    if (!email) {
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+    }
 
-    // 1) User
+    const body = await req.json();
+    const { projectName, scan } = BodySchema.parse(body);
+
+    // 1) User (should exist already via NextAuth, but upsert is safe)
     const user = await prisma.user.upsert({
       where: { email },
       update: {},
       create: { email },
+      select: { id: true, email: true },
     });
 
     // 2) Project (unique per user+name)
@@ -49,6 +60,7 @@ export async function POST(req: Request) {
         userId: user.id,
         name: projectName,
       },
+      select: { id: true, name: true },
     });
 
     // 3) Build
@@ -56,27 +68,27 @@ export async function POST(req: Request) {
       data: {
         userId: user.id,
         projectId: project.id,
-
         status: "scanned",
-
-        // Your schema currently includes these fields (as seen in Neon):
         scannedAt: new Date(scan.scanned_at),
         quickScore: scan.quick_score,
         brotliPresent: scan.compression.brotli_present,
         gzipPresent: scan.compression.gzip_present,
-
         scanResult: scan,
       },
+      select: { id: true, projectId: true },
     });
 
-    // 4) LaunchProfile (created empty now; wizard will fill later)
+    // 4) LaunchProfile (created empty now; wizard fills later)
     await prisma.launchProfile.create({
-      data: {
-        buildId: build.id,
-      },
+      data: { buildId: build.id },
+      select: { id: true },
     });
 
-    console.log("[scanbuild] saved build", { buildId: build.id, projectId: project.id, email });
+    console.log("[scanbuild] saved build", {
+      buildId: build.id,
+      projectId: project.id,
+      email: user.email,
+    });
 
     return NextResponse.json({
       success: true,
@@ -86,9 +98,11 @@ export async function POST(req: Request) {
     });
   } catch (err: any) {
     console.error("[scanbuild] failed:", err);
-    return NextResponse.json(
-      { success: false, error: err?.message || "Failed to save scan" },
-      { status: 400 }
-    );
+    const message =
+      err?.name === "ZodError"
+        ? "Invalid request body"
+        : err?.message || "Failed to save scan";
+
+    return NextResponse.json({ success: false, error: message }, { status: 400 });
   }
 }

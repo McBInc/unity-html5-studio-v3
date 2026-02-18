@@ -212,7 +212,7 @@ function Breakdown({ title, deductions }: { title: string; deductions: any[] }) 
           {deductions.map((d, i) => (
             <li key={i} className="flex justify-between gap-3">
               <span>{d.reason}</span>
-              <span> className="font-medium">-{Math.round(d.penalty)}</span>
+              <span className="font-medium">-{Math.round(d.penalty)}</span>
             </li>
           ))}
         </ul>

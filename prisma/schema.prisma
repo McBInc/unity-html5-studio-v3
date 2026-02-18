@@ -25,6 +25,10 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  fixPackUses Int @default(0)
+  subscriptionActive Boolean @default(false)
+
+
   entitlements Entitlement[]
   projects     Project[]
   builds       Build[]

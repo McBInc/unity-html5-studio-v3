@@ -1,40 +1,64 @@
 // src/app/layout.tsx
-import React from "react";
-import Providers from "./providers";
-import HeaderAuth from "./header-auth";
+import "./globals.css";
+import type { Metadata } from "next";
+import { ReactNode } from "react";
 
-export const metadata = {
-  title: "Unity → HTML5 Preflight",
-  description: "Quick scan + deterministic verification for Unity WebGL/HTML5 deployment.",
+export const metadata: Metadata = {
+  title: "Unity → HTML5 Studio",
+  description:
+    "Verify, prepare, and deploy Unity WebGL builds with confidence. Scan your build, get your readiness score, and deploy without hosting errors.",
+  manifest: "/manifest.json",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body style={{ fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", margin: 0 }}>
-        <Providers>
-          <div style={{ maxWidth: 980, margin: "0 auto", padding: 24 }}>
-            <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 18 }}>Unity → HTML5 Preflight</div>
-                <div style={{ opacity: 0.75, fontSize: 13 }}>Quick Scan • Build Verifier • Roadmap-ready JSON</div>
-              </div>
+      <head>
+        <link rel="manifest" href="/manifest.json" />
+      </head>
 
-              <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                <a href="/docs" style={{ textDecoration: "none", fontSize: 14 }}>
-                  Docs
-                </a>
-                <HeaderAuth />
-              </div>
-            </header>
+      <body className="bg-white text-neutral-900">
+        <header className="sticky top-0 z-10 border-b bg-white/90 backdrop-blur">
+          <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-3">
+            <a href="/" className="text-sm font-extrabold tracking-tight">
+              Unity → HTML5 Studio
+            </a>
 
-            <main style={{ marginTop: 24 }}>{children}</main>
-
-            <footer style={{ marginTop: 48, paddingTop: 16, borderTop: "1px solid #eee", fontSize: 12, opacity: 0.7 }}>
-              This scaffold performs analysis/verification only. Conversion steps remain user-controlled.
-            </footer>
+            <nav className="flex items-center gap-3 text-sm">
+              <a
+                href="/landing"
+                className="rounded-lg px-3 py-2 hover:bg-neutral-100"
+              >
+                Overview
+              </a>
+              <a
+                href="/"
+                className="rounded-lg px-3 py-2 hover:bg-neutral-100"
+              >
+                Scan
+              </a>
+              <a
+                href="/guide"
+                className="rounded-lg px-3 py-2 hover:bg-neutral-100"
+              >
+                Build Guide
+              </a>
+              <a
+                href="/pricing"
+                className="rounded-lg bg-black px-3 py-2 font-extrabold text-white"
+              >
+                Pricing
+              </a>
+            </nav>
           </div>
-        </Providers>
+        </header>
+
+        <main className="min-h-[80vh]">{children}</main>
+
+        <footer className="border-t py-6 text-center text-xs text-neutral-500">
+          Unity → HTML5 Studio provides build verification and deployment guidance.
+          Deployment and hosting remain under your control.
+        </footer>
       </body>
     </html>
   );
