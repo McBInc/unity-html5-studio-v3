@@ -1,5 +1,7 @@
 // src/app/history/page.tsx
 "use client";
+export const dynamic = "force-dynamic";
+
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
