@@ -1,10 +1,11 @@
 // src/app/api/launch-profile/save/route.ts
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@/generated/prisma";
+import { prisma } from "@/lib/db";
 import { normalizeScan } from "@/lib/launch/normalizeScan";
 import { scoreLaunch } from "@/lib/launch/scoring";
 
-const prisma = new PrismaClient();
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   try {
@@ -36,7 +37,7 @@ export async function POST(req: Request) {
     }
 
     // ✅ Your schema uses Build.scanResult
-    const scanJson = build.scanResult;
+    const scanJson = build.scanResult as any;
 
     if (!scanJson) {
       return NextResponse.json({ error: "Build has no scan JSON" }, { status: 400 });
@@ -89,7 +90,6 @@ export async function POST(req: Request) {
     const launchProfile = await prisma.launchProfile.upsert({
       where: { buildId },
       update: {
-        // new intelligence fields
         targetPlatformId,
         targetHostId,
         monetizationIntent,
@@ -101,11 +101,6 @@ export async function POST(req: Request) {
       },
       create: {
         buildId,
-
-        // keep old fields stable (optional defaults)
-        // hostProvider/destinationPlatform remain whatever defaults you set in schema
-
-        // new intelligence fields
         targetPlatformId,
         targetHostId,
         monetizationIntent,
