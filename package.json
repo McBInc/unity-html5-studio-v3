@@ -30,7 +30,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.18",
     "@types/adm-zip": "^0.5.7",
-    "@types/node": "^25.2.2",
+    "@types/node": "^25.2.3",
     "@types/nodemailer": "^7.0.10",
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
