@@ -31,13 +31,12 @@ function clamp(n: number, lo = 0, hi = 100) {
 }
 
 function detectCompressionMode(scan: ScanLike): "brotli" | "gzip" | "none" | "mixed" {
-  // Prefer new field if you adopt upgraded scanner
   const mode = scan?.compression_mode;
   if (mode === "brotli" || mode === "gzip" || mode === "none" || mode === "mixed") return mode;
 
-  // Fallback to old fields
   const brotli = !!scan?.compression?.brotli_present;
   const gzip = !!scan?.compression?.gzip_present;
+
   if (brotli && gzip) return "mixed";
   if (brotli) return "brotli";
   if (gzip) return "gzip";
@@ -45,7 +44,6 @@ function detectCompressionMode(scan: ScanLike): "brotli" | "gzip" | "none" | "mi
 }
 
 function detectStructure(scan: ScanLike) {
-  // Prefer new field (upgraded scanner)
   const s = scan?.structure;
   if (s && typeof s === "object") {
     const hasIndex = !!s.has_index_html;
@@ -67,16 +65,19 @@ function detectStructure(scan: ScanLike) {
     };
   }
 
-  // Minimal fallback when structure fields are not present:
-  // Your original scan only inspects Build folder and returns files[]
-  const fileNames: string[] = Array.isArray(scan?.files) ? scan.files.map((f: any) => String(f.name || "")) : [];
+  const fileNames: string[] = Array.isArray(scan?.files)
+    ? scan.files.map((f: any) => String(f?.name || ""))
+    : [];
+
   const hasLoader = fileNames.some((n) => n.toLowerCase().endsWith(".loader.js"));
   const hasFramework = fileNames.some((n) => n.toLowerCase().includes(".framework.js"));
-  const hasData = fileNames.some((n) => n.endsWith(".data") || n.endsWith(".data.br") || n.endsWith(".data.gz"));
-  const hasWasm = fileNames.some((n) => n.endsWith(".wasm") || n.endsWith(".wasm.br") || n.endsWith(".wasm.gz"));
+  const hasData = fileNames.some(
+    (n) => n.endsWith(".data") || n.endsWith(".data.br") || n.endsWith(".data.gz")
+  );
+  const hasWasm = fileNames.some(
+    (n) => n.endsWith(".wasm") || n.endsWith(".wasm.br") || n.endsWith(".wasm.gz")
+  );
 
-  // index.html + TemplateData can't be detected from old output.
-  // We assume “unknown” and do not block deployable purely on that.
   return {
     hasIndex: false,
     hasTemplateData: false,
@@ -84,7 +85,7 @@ function detectStructure(scan: ScanLike) {
     hasFramework,
     hasData,
     hasWasm,
-    deployable: hasLoader && hasData && hasWasm, // fallback definition
+    deployable: hasLoader && hasData && hasWasm,
     notes: ["Structure fields not present in scan output; using Build-folder heuristics only."],
   };
 }
@@ -100,8 +101,14 @@ function scoreHosts(scan: ScanLike): { scores: HostScore[]; recommended: HostSco
 
   const baseReadiness = clamp(quick);
 
-  function make(slug: HostSlug, base: number, reasons: string[], compatible: boolean, fixpackRequired: boolean) {
-    const compliant = !needsHeaders || fixpackRequired; // if compressed, compliance is achieved via fixpack/config
+  function make(
+    slug: HostSlug,
+    base: number,
+    reasons: string[],
+    compatible: boolean,
+    fixpackRequired: boolean
+  ) {
+    const compliant = !needsHeaders || fixpackRequired;
     const certified = compatible && structure.deployable;
 
     const score = clamp(
@@ -125,7 +132,6 @@ function scoreHosts(scan: ScanLike): { scores: HostScore[]; recommended: HostSco
 
   const scores: HostScore[] = [];
 
-  // NETLIFY
   scores.push(
     make(
       "netlify",
@@ -140,7 +146,6 @@ function scoreHosts(scan: ScanLike): { scores: HostScore[]; recommended: HostSco
     )
   );
 
-  // VERCEL
   scores.push(
     make(
       "vercel",
@@ -155,7 +160,6 @@ function scoreHosts(scan: ScanLike): { scores: HostScore[]; recommended: HostSco
     )
   );
 
-  // APACHE
   scores.push(
     make(
       "apache",
@@ -170,7 +174,6 @@ function scoreHosts(scan: ScanLike): { scores: HostScore[]; recommended: HostSco
     )
   );
 
-  // NGINX
   scores.push(
     make(
       "nginx",
@@ -185,7 +188,6 @@ function scoreHosts(scan: ScanLike): { scores: HostScore[]; recommended: HostSco
     )
   );
 
-  // GITHUB PAGES
   scores.push(
     make(
       "github_pages",
@@ -201,16 +203,90 @@ function scoreHosts(scan: ScanLike): { scores: HostScore[]; recommended: HostSco
     )
   );
 
-  // Pick best score
   const recommended = [...scores].sort((a, b) => b.score - a.score)[0];
 
-  // Add a couple extra reasons to recommended
   recommended.reasons.push(
     hasBrotli ? "Brotli detected (best performance when hosted correctly)." : hasGzip ? "Gzip detected." : "No compression detected."
   );
+
   if (structure.notes.length) recommended.reasons.push(...structure.notes.slice(0, 3));
 
   return { scores, recommended };
+}
+
+function getContentType(req: NextRequest) {
+  return (req.headers.get("content-type") || "").toLowerCase();
+}
+
+function decodeBase64ToBuffer(b64: string): Buffer {
+  // Allow data:...;base64,xxxx
+  const comma = b64.indexOf(",");
+  const raw = comma >= 0 ? b64.slice(comma + 1) : b64;
+  return Buffer.from(raw, "base64");
+}
+
+async function parseUpload(req: NextRequest): Promise<{
+  buffer: Buffer;
+  projectName: string;
+  originalName: string;
+}> {
+  const ct = getContentType(req);
+
+  // 1) multipart/form-data (normal browser upload)
+  if (ct.includes("multipart/form-data")) {
+    const form = await req.formData();
+    const file = form.get("file") as File | null;
+
+    if (!file) {
+      throw new Error("Missing ZIP file (expected form field: file)");
+    }
+
+    const projectName = (form.get("projectName") as string) || "Default Project";
+    const originalName = (file as any)?.name ? String((file as any).name) : "build.zip";
+
+    const buffer = Buffer.from(await file.arrayBuffer());
+    return { buffer, projectName, originalName };
+  }
+
+  // 2) JSON (support base64 ZIP posts)
+  if (ct.includes("application/json")) {
+    const body = await req.json().catch(() => null);
+    const zipBase64 = body?.zipBase64 || body?.zip_b64 || body?.zip;
+
+    if (!zipBase64 || typeof zipBase64 !== "string") {
+      throw new Error(
+        'Invalid JSON body. Expected { "zipBase64": "<base64>" } (optionally with "projectName").'
+      );
+    }
+
+    const projectName = typeof body?.projectName === "string" && body.projectName.trim()
+      ? body.projectName.trim()
+      : "Default Project";
+
+    const originalName = typeof body?.filename === "string" && body.filename.trim()
+      ? body.filename.trim()
+      : "build.zip";
+
+    const buffer = decodeBase64ToBuffer(zipBase64);
+    return { buffer, projectName, originalName };
+  }
+
+  // 3) Raw bytes (application/octet-stream)
+  if (ct.includes("application/octet-stream") || ct.includes("application/zip")) {
+    const ab = await req.arrayBuffer();
+    const buffer = Buffer.from(ab);
+
+    const projectName = req.nextUrl.searchParams.get("projectName") || "Default Project";
+    const originalName = req.headers.get("x-filename") || "build.zip";
+
+    if (!buffer.length) throw new Error("Empty request body (expected ZIP bytes).");
+    return { buffer, projectName, originalName };
+  }
+
+  // Unsupported
+  throw new Error(
+    `Unsupported Content-Type: "${ct || "missing"}". Use multipart/form-data (recommended), or application/json (base64), or application/octet-stream.`
+  );
 }
 
 export async function POST(req: NextRequest) {
@@ -219,39 +295,27 @@ export async function POST(req: NextRequest) {
     const session = await getServerSession(authOptions);
 
     if (!session?.user?.email) {
-      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+      return NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 });
     }
 
     const email = session.user.email;
 
-    const user = await prisma.user.findUnique({
-      where: { email },
-    });
-
+    const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
-      return NextResponse.json({ error: "User not found" }, { status: 404 });
+      return NextResponse.json({ ok: false, error: "User not found" }, { status: 404 });
     }
 
     // ---------- FILE ----------
-    const form = await req.formData();
-    const file = form.get("file") as File | null;
-
-    if (!file) {
-      return NextResponse.json({ error: "Missing ZIP file" }, { status: 400 });
-    }
-
-    const buffer = Buffer.from(await file.arrayBuffer());
+    const { buffer, projectName } = await parseUpload(req);
 
     // ---------- RUN SCAN ----------
     const scan = await scanWebglBuildZip(buffer);
 
-    // ---------- AUTO HOST SCORING ----------
+    // ---------- HOST SCORING ----------
     const hostScoring = scoreHosts(scan);
     const recommendedHost = hostScoring.recommended.slug;
 
     // ---------- FIND / CREATE PROJECT ----------
-    const projectName = (form.get("projectName") as string) || "Default Project";
-
     let project = await prisma.project.findUnique({
       where: {
         userId_name: {
@@ -270,8 +334,13 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // ---------- GENERATE CERT ID ----------
+    // ---------- CERT ID ----------
     const certId = await generateCertId();
+
+    // Safe guards for scan fields
+    const quickScore = Number.isFinite(scan?.quick_score) ? Number(scan.quick_score) : 0;
+    const brotliPresent = !!scan?.compression?.brotli_present;
+    const gzipPresent = !!scan?.compression?.gzip_present;
 
     // ---------- CREATE BUILD ----------
     const build = await prisma.build.create({
@@ -283,9 +352,9 @@ export async function POST(req: NextRequest) {
         scanResult: scan as any,
         scannedAt: new Date(),
 
-        quickScore: scan.quick_score,
-        brotliPresent: scan.compression.brotli_present,
-        gzipPresent: scan.compression.gzip_present,
+        quickScore,
+        brotliPresent,
+        gzipPresent,
 
         certId,
         reportStatus: "draft",
@@ -293,21 +362,18 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    // ---------- LINK TO Host table (optional, safe) ----------
-    // If Host rows exist, attach targetHostId; if not, we still save strings + JSON
+    // ---------- OPTIONAL Host table linkage ----------
     const hostRow = await prisma.host
       .findUnique({ where: { slug: recommendedHost } })
       .catch(() => null);
 
-    // ---------- UPSERT LaunchProfile WITH SCORES ----------
-    // This makes History + Launch Wizard show scores immediately
+    // ---------- UPSERT LaunchProfile ----------
     await prisma.launchProfile.upsert({
       where: { buildId: build.id },
       update: {
         hostProvider: recommendedHost,
-        // Keep destinationPlatform unchanged for now
-        readinessScore: clamp(scan.quick_score),
-        platformFitScore: clamp(scan.quick_score), // v1 = same as readiness; can evolve later
+        readinessScore: clamp(quickScore),
+        platformFitScore: clamp(quickScore),
         hostCompatibilityScore: clamp(hostScoring.recommended.score),
         recommendationsJson: {
           v: 1,
@@ -323,8 +389,8 @@ export async function POST(req: NextRequest) {
         destinationPlatform: "unknown",
         goal: "test",
         monetization: "unknown",
-        readinessScore: clamp(scan.quick_score),
-        platformFitScore: clamp(scan.quick_score),
+        readinessScore: clamp(quickScore),
+        platformFitScore: clamp(quickScore),
         hostCompatibilityScore: clamp(hostScoring.recommended.score),
         recommendationsJson: {
           v: 1,
@@ -336,21 +402,23 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    // ---------- RESPONSE ----------
     return NextResponse.json({
       ok: true,
       buildId: build.id,
       certId: build.certId,
       reportUrl: `/report/${build.certId}`,
+      scan,
 
       quickScore: build.quickScore,
-
-      // expose scoring summary to UI immediately if you want
       recommendedHost,
       hostCompatibilityScore: hostScoring.recommended.score,
     });
   } catch (err: any) {
+    const msg = err?.message || "Scan failed";
     console.error("SCAN ERROR", err);
-    return NextResponse.json({ error: err?.message || "Scan failed" }, { status: 500 });
+
+    // If it's the content-type mismatch, return 415 (Unsupported Media Type) to be explicit
+    const ct = msg.toLowerCase().includes("unsupported content-type");
+    return NextResponse.json({ ok: false, error: msg }, { status: ct ? 415 : 500 });
   }
 }
