@@ -1,128 +1,244 @@
-import { prisma } from "@/lib/db";
+// src/app/report/[certId]/page.tsx
+"use client";
 
-export const dynamic = "force-dynamic";
+import React, { useEffect, useMemo, useState } from "react";
 
-interface Props {
-  params: {
-    certId: string;
-  };
+type ReportPayload =
+  | {
+      ok: true;
+      certId: string;
+      buildId: string;
+      projectName: string;
+      scannedAt: string | Date | null;
+      quickScore: number;
+      brotliPresent: boolean;
+      gzipPresent: boolean;
+      scan: any;
+      launchProfile: any;
+    }
+  | { ok: false; error: string };
+
+function scoreBand(score: number) {
+  if (score >= 90) return { label: "Certified: Ready", note: "Low risk of hosting-related failures." };
+  if (score >= 75) return { label: "Certified: Deployable", note: "Should work — Fix Pack reduces edge cases." };
+  if (score >= 50) return { label: "Conditional", note: "Likely to fail unless hosting is configured correctly." };
+  if (score >= 25) return { label: "High Risk", note: "Very likely to fail online unless corrected." };
+  return { label: "Fail", note: "Critical WebGL components or assumptions are missing." };
 }
 
-export default async function Page({ params }: Props) {
+function fmtDate(d: any) {
+  try {
+    const dt = typeof d === "string" ? new Date(d) : d instanceof Date ? d : null;
+    if (!dt) return "—";
+    return dt.toLocaleString();
+  } catch {
+    return "—";
+  }
+}
 
-  const build = await prisma.build.findUnique({
-    where: {
-      certId: params.certId,
-    },
-    include: {
-      project: true,
-      launchProfile: true,
-      fixPacks: true,
-    },
-  });
+export default function ReportPage({ params }: { params: { certId: string } }) {
+  const certId = params.certId;
 
-  if (!build) {
+  const [data, setData] = useState<ReportPayload | null>(null);
+  const [loading, setLoading] = useState(true);
 
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await fetch(`/api/report/${encodeURIComponent(certId)}`, { cache: "no-store" });
+        const json = (await res.json()) as ReportPayload;
+        if (!alive) return;
+        setData(json);
+      } catch (e: any) {
+        if (!alive) return;
+        setData({ ok: false, error: e?.message || "Failed to load report" });
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [certId]);
+
+  const score = useMemo(() => {
+    if (!data || !("ok" in data) || !data.ok) return 0;
+    return Number.isFinite(data.quickScore) ? data.quickScore : 0;
+  }, [data]);
+
+  const band = useMemo(() => scoreBand(score), [score]);
+
+  const recommendedHost = useMemo(() => {
+    if (!data || !("ok" in data) || !data.ok) return null;
+    const lp = data.launchProfile;
+    const host = lp?.hostProvider || lp?.host_provider || null;
+    const score = lp?.hostCompatibilityScore ?? lp?.host_compatibility_score ?? null;
+    return host ? { host: String(host), score: typeof score === "number" ? score : null } : null;
+  }, [data]);
+
+  const checks = useMemo(() => {
+    if (!data || !("ok" in data) || !data.ok) return [];
+    const hc = data.scan?.hosting_checks;
+    if (Array.isArray(hc)) return hc.slice(0, 12);
+    return [];
+  }, [data]);
+
+  if (loading) {
     return (
-
-      <div style={{ padding: 40 }}>
-
-        <h1>Report Not Found</h1>
-
+      <div style={{ padding: 20, maxWidth: 980, margin: "0 auto" }}>
+        <h1 style={{ fontSize: 28, margin: 0 }}>Certification Report</h1>
+        <p style={{ opacity: 0.75 }}>Loading report…</p>
       </div>
-
     );
-
   }
 
-  const allocationPassed =
-    build.allocationAt &&
-    new Date() >= build.allocationAt;
-
-  const reveal =
-    build.reportStatus === "revealed" ||
-    allocationPassed;
+  if (!data || !("ok" in data) || !data.ok) {
+    return (
+      <div style={{ padding: 20, maxWidth: 980, margin: "0 auto" }}>
+        <h1 style={{ fontSize: 28, margin: 0 }}>Certification Report</h1>
+        <div style={{ marginTop: 12, padding: 14, border: "1px solid #eee", borderRadius: 12, background: "#fff" }}>
+          <div style={{ fontWeight: 900, color: "crimson" }}>Report unavailable</div>
+          <div style={{ marginTop: 6, opacity: 0.85 }}>{data?.error || "Unknown error"}</div>
+          <div style={{ marginTop: 12 }}>
+            <a href="/" style={btnLink}>
+              Back to Scan →
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
+    <div style={{ padding: 20, maxWidth: 980, margin: "0 auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "baseline" }}>
+        <div>
+          <h1 style={{ fontSize: 28, margin: 0 }}>Certification Report</h1>
+          <div style={{ marginTop: 6, opacity: 0.75 }}>
+            Project: <b>{data.projectName}</b>
+          </div>
+        </div>
 
-    <div style={{ padding: 40, fontFamily: "sans-serif" }}>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontFamily: "monospace", fontSize: 12, opacity: 0.7 }}>CERT ID</div>
+          <div style={{ fontFamily: "monospace", fontWeight: 900 }}>{data.certId}</div>
+        </div>
+      </div>
 
-      <h1>WebGLive Certification Report</h1>
+      {/* Hero */}
+      <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#fafafa" }}>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ minWidth: 220 }}>
+            <div style={{ fontSize: 12, opacity: 0.7 }}>Certification Status</div>
+            <div style={{ fontSize: 18, fontWeight: 900 }}>{band.label}</div>
+            <div style={{ marginTop: 6, opacity: 0.85 }}>{band.note}</div>
+          </div>
 
-      <p>
+          <div style={kpiCard}>
+            <div style={kpiLabel}>Readiness Score</div>
+            <div style={kpiValue}>{score}/100</div>
+          </div>
 
-        Certificate ID: <b>{build.certId}</b>
+          <div style={kpiCard}>
+            <div style={kpiLabel}>Brotli</div>
+            <div style={kpiValue}>{data.brotliPresent ? "Yes" : "No"}</div>
+          </div>
 
-      </p>
+          <div style={kpiCard}>
+            <div style={kpiLabel}>Gzip</div>
+            <div style={kpiValue}>{data.gzipPresent ? "Yes" : "No"}</div>
+          </div>
 
-      <hr />
-
-      <h2>Project</h2>
-
-      <p>{build.project.name}</p>
-
-      <h2>Scan Summary</h2>
-
-      <p>Quick Score: {build.quickScore}</p>
-
-      <p>Brotli: {String(build.brotliPresent)}</p>
-
-      <p>Gzip: {String(build.gzipPresent)}</p>
-
-      <h2>Launch Readiness</h2>
-
-      <p>
-
-        Readiness Score:
-
-        {" "}
-
-        {build.launchProfile?.readinessScore}
-
-      </p>
-
-      <h2>Time To Live Allocation</h2>
-
-      <p>
-
-        Allocation:
-
-        {" "}
-
-        {build.allocationAt?.toISOString()}
-
-      </p>
-
-      <h2>Play Now</h2>
-
-      {
-
-        reveal && build.liveUrl
-
-          ? (
-
-            <a href={build.liveUrl}>
-
-              Play Live Game
-
+          <div style={{ marginLeft: "auto", display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <a href="/history" style={btnLink}>
+              View History →
             </a>
+            <a href="/" style={btnLink}>
+              New Scan →
+            </a>
+          </div>
+        </div>
 
-          )
+        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
+          Scanned: {fmtDate(data.scannedAt)} • Build ID: <span style={{ fontFamily: "monospace" }}>{data.buildId}</span>
+        </div>
+      </div>
 
-          : (
+      {/* Recommended host */}
+      <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#fff" }}>
+        <div style={{ fontWeight: 900, marginBottom: 6 }}>Recommended Host</div>
+        {recommendedHost ? (
+          <div style={{ opacity: 0.9 }}>
+            <b style={{ textTransform: "capitalize" }}>{recommendedHost.host.replace(/_/g, " ")}</b>
+            {typeof recommendedHost.score === "number" ? (
+              <span style={{ opacity: 0.7 }}> • Compatibility score: {Math.round(recommendedHost.score)}/100</span>
+            ) : null}
+          </div>
+        ) : (
+          <div style={{ opacity: 0.75 }}>No host recommendation available yet.</div>
+        )}
+        <div style={{ marginTop: 10, opacity: 0.8 }}>
+          Next step: generate a Fix Pack for the recommended host from the scan page.
+        </div>
+      </div>
 
-            <p>
+      {/* Checks */}
+      <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#fff" }}>
+        <div style={{ fontWeight: 900, marginBottom: 8 }}>Hosting Checks</div>
+        {checks.length ? (
+          <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.6 }}>
+            {checks.map((c: any, i: number) => (
+              <li key={i}>
+                <b style={{ textTransform: "uppercase", fontSize: 11, opacity: 0.7 }}>{c?.severity || "info"}</b>{" "}
+                <span>{c?.check || String(c)}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div style={{ opacity: 0.75 }}>No checks found in scan result.</div>
+        )}
+      </div>
 
-              Link revealed after deployment
-
-            </p>
-
-          )
-
-      }
-
+      {/* Raw scan (collapsible) */}
+      <details style={{ marginTop: 16 }}>
+        <summary style={{ cursor: "pointer", fontWeight: 900 }}>Raw Scan JSON</summary>
+        <pre
+          style={{
+            marginTop: 10,
+            padding: 12,
+            border: "1px solid #eee",
+            borderRadius: 12,
+            background: "#fafafa",
+            overflowX: "auto",
+            fontSize: 12,
+          }}
+        >
+          {JSON.stringify(data.scan, null, 2)}
+        </pre>
+      </details>
     </div>
-
   );
-
 }
+
+const btnLink: React.CSSProperties = {
+  padding: "10px 14px",
+  borderRadius: 10,
+  border: "1px solid #111",
+  background: "#111",
+  color: "#fff",
+  fontWeight: 900,
+  textDecoration: "none",
+};
+
+const kpiCard: React.CSSProperties = {
+  padding: 12,
+  borderRadius: 12,
+  border: "1px solid #eee",
+  minWidth: 140,
+  background: "#fff",
+};
+
+const kpiLabel: React.CSSProperties = { fontSize: 12, opacity: 0.7 };
+const kpiValue: React.CSSProperties = { fontWeight: 900, fontSize: 18 };
