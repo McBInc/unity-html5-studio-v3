@@ -4,8 +4,8 @@ import ReportClient, { ReportPayload } from "./ReportClient";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export default async function Page({ params }: { params: { certid: string } }) {
-  const certId = params?.certid;
+export default async function Page({ params }: { params: { certId: string } }) {
+  const certId = params?.certId;
 
   if (!certId) {
     return <div style={{ padding: 20 }}>Missing certId in URL.</div>;
