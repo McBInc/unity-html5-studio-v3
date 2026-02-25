@@ -13,13 +13,11 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ certId: st
       return NextResponse.json({ ok: false, error: "Missing certId" }, { status: 400 });
     }
 
-    const build = await prisma.build.findUnique({
-      where: { certId },
-      include: {
-        project: true,
-        launchProfile: true,
-      },
-    });
+    const build = await prisma.build.findFirst({
+  where: { certId },
+  orderBy: { scannedAt: "desc" },
+  include: { project: true, launchProfile: true },
+});
 
     if (!build) {
       return NextResponse.json({ ok: false, error: "Report not found" }, { status: 404 });
