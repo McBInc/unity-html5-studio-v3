@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import ReportClient from "./ReportClient";
+import ReportClient, { ReportPayload } from "./ReportClient";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
