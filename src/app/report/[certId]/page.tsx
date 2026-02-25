@@ -5,11 +5,8 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export default async function Page({ params }: { params: { certId: string } }) {
-  const certId = params?.certId;
 
-  if (!certId) {
-    return <div style={{ padding: 20 }}>Missing certId in URL.</div>;
-  }
+  const certId = params.certId;
 
   const build = await prisma.build.findFirst({
     where: { certId },
@@ -17,14 +14,13 @@ export default async function Page({ params }: { params: { certId: string } }) {
     include: { project: true, launchProfile: true },
   });
 
-  if (!build || !build.certId) {
+  if (!build) {
     return <div style={{ padding: 20 }}>Report not found.</div>;
   }
 
-  // Pass the draft report to the client component (instant render)
-  const initial = {
-    ok: true as const,
-    certId: (build.certId || certId), 
+  const initial: ReportPayload = {
+    ok: true,
+    certId: build.certId || certId,
     buildId: build.id,
     projectName: build.project?.name ?? "Untitled Project",
     scannedAt: build.scannedAt,
