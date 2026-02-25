@@ -510,11 +510,11 @@ export default function HomePage() {
               View in History →
             </a>
 
-            {reportUrl && (
-              <a href={reportUrl} style={linkBtn}>
-                Open Certification Report →
-              </a>
-            )}
+            {(reportUrl || certId) && (
+  <a href={reportUrl || `/report/${certId}`} style={linkBtn}>
+    Open Certification Report →
+  </a>
+)}
           </div>
         </div>
       )}
