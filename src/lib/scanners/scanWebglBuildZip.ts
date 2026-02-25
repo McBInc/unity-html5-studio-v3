@@ -1,3 +1,4 @@
+// src/lib/scanners/scanWebglBuildZip.ts
 import crypto from "crypto";
 import path from "path";
 import os from "os";
@@ -7,96 +8,169 @@ import { z } from "zod";
 
 /**
  * Server-safe WebGL ZIP scanner (no system binaries)
+ *
+ * Upgrades (SaaS-grade):
+ * - Cleans up temp folder (prevents disk leaks)
+ * - Does not leak server paths in report
+ * - Adds structure checks (index.html, TemplateData, Build contents)
+ * - Adds compression mode + per-artifact compression
+ * - Adds deployability + basic host recommendation + compatibility matrix
+ * - Keeps existing fields for backward compatibility
  */
 export async function scanWebglBuildZip(zipBuffer: Buffer) {
   const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "webgl-build-"));
 
-  // Unzip in memory
-  const zip = new AdmZip(zipBuffer);
-  zip.extractAllTo(tmpRoot, true);
+  try {
+    // Unzip to temp
+    const zip = new AdmZip(zipBuffer);
+    zip.extractAllTo(tmpRoot, true);
 
-  const buildDir = await findBuildDir(tmpRoot);
+    const buildDir = await findBuildDir(tmpRoot);
 
-  if (!buildDir) {
-    throw new Error(
-      "Could not locate a Unity WebGL Build folder (missing .data/.wasm)."
+    if (!buildDir) {
+      throw new Error(
+        "Could not locate a Unity WebGL Build folder (missing .data/.wasm)."
+      );
+    }
+
+    // Parent folder is where Unity typically outputs index.html + TemplateData + Build/
+    const projectRoot = path.dirname(buildDir);
+
+    const structure = await detectStructure(projectRoot, buildDir);
+
+    // List files in Build folder (only)
+    const entries = await fs.readdir(buildDir);
+
+    const files: {
+      name: string;
+      size_bytes: number;
+      sha256: string;
+    }[] = [];
+
+    for (const name of entries) {
+      const full = path.join(buildDir, name);
+      const st = await fs.stat(full);
+      if (!st.isFile()) continue;
+
+      const data = await fs.readFile(full);
+      files.push({
+        name,
+        size_bytes: st.size,
+        sha256: crypto
+          .createHash("sha256")
+          .update(data)
+          .digest("hex")
+          .slice(0, 16),
+      });
+    }
+
+    files.sort((a, b) => b.size_bytes - a.size_bytes);
+
+    const brotliPresent = files.some((f) => f.name.endsWith(".br"));
+    const gzipPresent = files.some((f) => f.name.endsWith(".gz"));
+
+    const compressionMode = computeCompressionMode(files);
+
+    const loader = files.find((f) =>
+      f.name.toLowerCase().endsWith(".loader.js")
     );
-  }
 
-  const entries = await fs.readdir(buildDir);
+    const memValues = loader
+      ? await extractMemoryHints(path.join(buildDir, loader.name))
+      : [];
 
-  const files: {
-    name: string;
-    size_bytes: number;
-    sha256: string;
-  }[] = [];
+    // Basic deployability: must have Build data+wasm + loader + index + TemplateData
+    const deployable =
+      structure.has_build_dir &&
+      structure.has_data &&
+      structure.has_wasm &&
+      structure.has_loader &&
+      structure.has_index_html &&
+      structure.has_template_data;
 
-  for (const name of entries) {
-    const full = path.join(buildDir, name);
-    const st = await fs.stat(full);
-
-    if (!st.isFile()) continue;
-
-    const data = await fs.readFile(full);
-
-    files.push({
-      name,
-      size_bytes: st.size,
-      sha256: crypto
-        .createHash("sha256")
-        .update(data)
-        .digest("hex")
-        .slice(0, 16),
+    // Quick score: keep concept, but make it reflect structure + compression
+    const quickScore = computeQuickScore({
+      structure,
+      compressionMode,
     });
-  }
 
-  files.sort((a, b) => b.size_bytes - a.size_bytes);
+    const compliance = {
+      requires_wasm_mime: true,
+      requires_brotli_headers: brotliPresent,
+      requires_gzip_headers: gzipPresent,
+      requires_cache_headers: true,
+      notes:
+        "Compliance signals are derived from detected compression + standard Unity WebGL serving requirements.",
+    };
 
-  const brotli = files.some((f) => f.name.endsWith(".br"));
-  const gzip = files.some((f) => f.name.endsWith(".gz"));
+    const compatibility = computeHostCompatibility({
+      deployable,
+      compressionMode,
+    });
 
-  const loader = files.find((f) =>
-    f.name.toLowerCase().endsWith(".loader.js")
-  );
+    const recommendedHost = pickRecommendedHost(compatibility);
 
-  const memValues = loader
-    ? await extractMemoryHints(path.join(buildDir, loader.name))
-    : [];
-
-  const report = {
-    kind: "webgl_build_scan",
-    scanned_at: new Date().toISOString(),
-    build_dir: buildDir,
-
-    quick_score: brotli ? 85 : 60,
-
-    compression: {
-      brotli_present: brotli,
-      gzip_present: gzip,
-      notes: "Detected by .br/.gz artifacts in the Build folder.",
-    },
-
-    memory_settings_detected_bytes: memValues.slice(0, 6),
-
-    hosting_checks: [
-      {
-        check: "Serve .br assets with Content-Encoding: br",
-        severity: brotli ? "high" : "info",
-      },
+    // Keep the existing hosting_checks, but make them consistent with detection
+    const hosting_checks = [
       {
         check: "Serve .wasm with MIME type application/wasm",
-        severity: "high",
+        severity: "high" as const,
       },
       {
         check: "Ensure HTTPS + cache headers for build assets",
-        severity: "medium",
+        severity: "medium" as const,
       },
-    ],
+      {
+        check: "Serve pre-compressed assets with correct Content-Encoding",
+        severity:
+          compressionMode === "none"
+            ? ("info" as const)
+            : ("high" as const),
+      },
+      {
+        check: "Verify required WebGL structure (index.html + TemplateData + Build)",
+        severity: deployable ? ("info" as const) : ("high" as const),
+      },
+    ];
 
-    files,
-  };
+    const report = {
+      kind: "webgl_build_scan",
+      scanned_at: new Date().toISOString(),
 
-  return BuildScanSchema.parse(report);
+      // IMPORTANT: do not leak server temp paths
+      // Keep field for backward compatibility but only expose a safe value.
+      build_dir: "Build",
+
+      // Existing fields
+      quick_score: quickScore,
+      compression: {
+        brotli_present: brotliPresent,
+        gzip_present: gzipPresent,
+        notes:
+          "Detected by .br/.gz artifacts in the Build folder; compression_mode summarizes the full state.",
+      },
+      memory_settings_detected_bytes: memValues.slice(0, 6),
+      hosting_checks,
+      files,
+
+      // New SaaS-grade fields (safe to add)
+      structure,
+      compression_mode: compressionMode,
+      deployment_readiness: {
+        deployable,
+        certification_level: deployable ? "Certified" : "Blocked",
+      },
+      compliance,
+      compatibility,
+      recommended_host: recommendedHost,
+      recommended_fixpack: recommendedHost, // maps directly to your fixpack presets
+    };
+
+    return BuildScanSchema.parse(report);
+  } finally {
+    // Cleanup temp folder (prevents disk growth on serverless)
+    await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 /* ---------------- Schema ---------------- */
@@ -104,6 +178,8 @@ export async function scanWebglBuildZip(zipBuffer: Buffer) {
 const BuildScanSchema = z.object({
   kind: z.literal("webgl_build_scan"),
   scanned_at: z.string(),
+
+  // keep for backward compatibility (but now safe value)
   build_dir: z.string(),
 
   quick_score: z.number().int().min(0).max(100),
@@ -130,6 +206,77 @@ const BuildScanSchema = z.object({
       sha256: z.string(),
     })
   ),
+
+  // New fields (optional-safe additions)
+  structure: z
+    .object({
+      has_index_html: z.boolean(),
+      has_template_data: z.boolean(),
+      has_build_dir: z.boolean(),
+      has_loader: z.boolean(),
+      has_framework: z.boolean(),
+      has_data: z.boolean(),
+      has_wasm: z.boolean(),
+      notes: z.array(z.string()).optional(),
+    })
+    .optional(),
+
+  compression_mode: z.enum(["brotli", "gzip", "none", "mixed"]).optional(),
+
+  deployment_readiness: z
+    .object({
+      deployable: z.boolean(),
+      certification_level: z.enum(["Certified", "Blocked"]),
+    })
+    .optional(),
+
+  compliance: z
+    .object({
+      requires_wasm_mime: z.boolean(),
+      requires_brotli_headers: z.boolean(),
+      requires_gzip_headers: z.boolean(),
+      requires_cache_headers: z.boolean(),
+      notes: z.string().optional(),
+    })
+    .optional(),
+
+  compatibility: z
+    .object({
+      vercel: z.object({
+        compatible: z.boolean(),
+        fixpack_required: z.boolean(),
+        reason: z.string().optional(),
+      }),
+      netlify: z.object({
+        compatible: z.boolean(),
+        fixpack_required: z.boolean(),
+        reason: z.string().optional(),
+      }),
+      apache: z.object({
+        compatible: z.boolean(),
+        fixpack_required: z.boolean(),
+        reason: z.string().optional(),
+      }),
+      nginx: z.object({
+        compatible: z.boolean(),
+        fixpack_required: z.boolean(),
+        reason: z.string().optional(),
+      }),
+      github_pages: z.object({
+        compatible: z.boolean(),
+        fixpack_required: z.boolean(),
+        reason: z.string().optional(),
+      }),
+    })
+    .optional(),
+
+  recommended_host: z
+    .enum(["vercel", "netlify", "apache", "nginx", "github_pages"])
+    .optional(),
+
+  recommended_fixpack: z
+    .enum(["vercel", "netlify", "apache", "nginx", "github_pages"])
+    .optional(),
 });
 
 /* ---------------- Helpers ---------------- */
@@ -146,23 +293,15 @@ async function findBuildDir(root: string) {
 
     const hasData = files.some(
       (n) =>
-        n.endsWith(".data") ||
-        n.endsWith(".data.br") ||
-        n.endsWith(".data.gz")
+        n.endsWith(".data") || n.endsWith(".data.br") || n.endsWith(".data.gz")
     );
 
     const hasWasm = files.some(
       (n) =>
-        n.endsWith(".wasm") ||
-        n.endsWith(".wasm.br") ||
-        n.endsWith(".wasm.gz")
+        n.endsWith(".wasm") || n.endsWith(".wasm.br") || n.endsWith(".wasm.gz")
     );
 
-    if (
-      path.basename(cur).toLowerCase() === "build" &&
-      hasData &&
-      hasWasm
-    ) {
+    if (path.basename(cur).toLowerCase() === "build" && hasData && hasWasm) {
       return cur;
     }
 
@@ -174,6 +313,173 @@ async function findBuildDir(root: string) {
   }
 
   return null;
+}
+
+async function detectStructure(projectRoot: string, buildDir: string) {
+  const notes: string[] = [];
+
+  const hasIndexHtml = await exists(path.join(projectRoot, "index.html"));
+  const hasTemplateData = await exists(path.join(projectRoot, "TemplateData"));
+
+  const buildEntries = await fs.readdir(buildDir).catch(() => []);
+  const lower = buildEntries.map((n) => n.toLowerCase());
+
+  const hasLoader = lower.some((n) => n.endsWith(".loader.js"));
+  const hasFramework = lower.some((n) =>
+    n.includes(".framework.js") || n.endsWith(".framework.js.br") || n.endsWith(".framework.js.gz")
+  );
+
+  const hasData = buildEntries.some(
+    (n) =>
+      n.endsWith(".data") || n.endsWith(".data.br") || n.endsWith(".data.gz")
+  );
+  const hasWasm = buildEntries.some(
+    (n) =>
+      n.endsWith(".wasm") || n.endsWith(".wasm.br") || n.endsWith(".wasm.gz")
+  );
+
+  if (!hasIndexHtml) notes.push("Missing index.html at project root (next to Build/).");
+  if (!hasTemplateData) notes.push("Missing TemplateData/ folder at project root (next to Build/).");
+  if (!hasLoader) notes.push("Missing *.loader.js in Build/ folder.");
+  if (!hasFramework) notes.push("Missing framework.js (or compressed variant) in Build/ folder.");
+
+  return {
+    has_index_html: hasIndexHtml,
+    has_template_data: hasTemplateData,
+    has_build_dir: true,
+    has_loader: hasLoader,
+    has_framework: hasFramework,
+    has_data: hasData,
+    has_wasm: hasWasm,
+    notes: notes.length ? notes : undefined,
+  };
+}
+
+async function exists(p: string) {
+  try {
+    await fs.stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function computeCompressionMode(
+  files: Array<{ name: string; size_bytes: number; sha256: string }>
+): "brotli" | "gzip" | "none" | "mixed" {
+  const hasBr = files.some((f) => f.name.endsWith(".br"));
+  const hasGz = files.some((f) => f.name.endsWith(".gz"));
+  if (hasBr && hasGz) return "mixed";
+  if (hasBr) return "brotli";
+  if (hasGz) return "gzip";
+  return "none";
+}
+
+function computeQuickScore(opts: {
+  structure: {
+    has_index_html: boolean;
+    has_template_data: boolean;
+    has_build_dir: boolean;
+    has_loader: boolean;
+    has_framework: boolean;
+    has_data: boolean;
+    has_wasm: boolean;
+  };
+  compressionMode: "brotli" | "gzip" | "none" | "mixed";
+}) {
+  let score = 50;
+
+  // Structure (biggest driver of “will it run”)
+  const s = opts.structure;
+  const structurePoints =
+    (s.has_index_html ? 8 : 0) +
+    (s.has_template_data ? 8 : 0) +
+    (s.has_loader ? 10 : 0) +
+    (s.has_framework ? 8 : 0) +
+    (s.has_data ? 8 : 0) +
+    (s.has_wasm ? 8 : 0);
+  score += structurePoints;
+
+  // Compression (quality + hosting complexity)
+  if (opts.compressionMode === "brotli") score += 10;
+  if (opts.compressionMode === "gzip") score += 6;
+  if (opts.compressionMode === "mixed") score += 2; // mixed tends to cause confusion
+
+  // Clamp
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function computeHostCompatibility(opts: {
+  deployable: boolean;
+  compressionMode: "brotli" | "gzip" | "none" | "mixed";
+}) {
+  // Basic, honest heuristics:
+  // - Vercel/Netlify: can be compatible with all modes if headers/routing are correct (fixpack usually needed for compressed)
+  // - Apache/Nginx: compatible but requires correct config (fixpack helps)
+  // - GitHub Pages: fine for uncompressed; compressed is difficult (no headers control)
+  const { deployable, compressionMode } = opts;
+
+  const needsHeaders =
+    compressionMode === "brotli" || compressionMode === "gzip" || compressionMode === "mixed";
+
+  return {
+    vercel: {
+      compatible: deployable,
+      fixpack_required: deployable ? needsHeaders : false,
+      reason: !deployable
+        ? "Build structure missing required files."
+        : needsHeaders
+        ? "Compressed assets require correct headers (Content-Encoding + MIME)."
+        : undefined,
+    },
+    netlify: {
+      compatible: deployable,
+      fixpack_required: deployable ? needsHeaders : false,
+      reason: !deployable
+        ? "Build structure missing required files."
+        : needsHeaders
+        ? "Compressed assets require correct headers (Content-Encoding + MIME)."
+        : undefined,
+    },
+    apache: {
+      compatible: deployable,
+      fixpack_required: deployable ? needsHeaders : false,
+      reason: !deployable
+        ? "Build structure missing required files."
+        : needsHeaders
+        ? "Requires server config for Content-Encoding + MIME."
+        : undefined,
+    },
+    nginx: {
+      compatible: deployable,
+      fixpack_required: deployable ? needsHeaders : false,
+      reason: !deployable
+        ? "Build structure missing required files."
+        : needsHeaders
+        ? "Requires server config for Content-Encoding + MIME."
+        : undefined,
+    },
+    github_pages: {
+      compatible: deployable && compressionMode === "none",
+      fixpack_required: false,
+      reason:
+        !deployable
+          ? "Build structure missing required files."
+          : compressionMode !== "none"
+          ? "GitHub Pages cannot reliably set Content-Encoding headers for pre-compressed Unity assets."
+          : undefined,
+    },
+  };
+}
+
+function pickRecommendedHost(compat: ReturnType<typeof computeHostCompatibility>) {
+  // Prefer Netlify first if compatible; then Vercel; then Nginx/Apache; then GitHub Pages (only for uncompressed).
+  if (compat.netlify.compatible) return "netlify" as const;
+  if (compat.vercel.compatible) return "vercel" as const;
+  if (compat.nginx.compatible) return "nginx" as const;
+  if (compat.apache.compatible) return "apache" as const;
+  if (compat.github_pages.compatible) return "github_pages" as const;
+  return "netlify" as const; // default fallback
 }
 
 async function extractMemoryHints(loaderPath: string) {
@@ -189,10 +495,8 @@ async function extractMemoryHints(loaderPath: string) {
 
   for (const pat of patterns) {
     let m: RegExpExecArray | null;
-
     while ((m = pat.exec(txt))) {
       const v = parseInt(m[1], 10);
-
       if (Number.isFinite(v)) found.add(v);
     }
   }

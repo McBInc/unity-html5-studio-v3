@@ -17,3 +17,7 @@ src/generated
 echo "*.mp4" >> .gitignore
 echo "*.zip" >> .gitignore
 *.mp4
+
+# local notes
+html5studio-*.txt
+dependency-map.txt
