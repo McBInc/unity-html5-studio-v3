@@ -65,18 +65,12 @@ function detectStructure(scan: ScanLike) {
     };
   }
 
-  const fileNames: string[] = Array.isArray(scan?.files)
-    ? scan.files.map((f: any) => String(f?.name || ""))
-    : [];
+  const fileNames: string[] = Array.isArray(scan?.files) ? scan.files.map((f: any) => String(f?.name || "")) : [];
 
   const hasLoader = fileNames.some((n) => n.toLowerCase().endsWith(".loader.js"));
   const hasFramework = fileNames.some((n) => n.toLowerCase().includes(".framework.js"));
-  const hasData = fileNames.some(
-    (n) => n.endsWith(".data") || n.endsWith(".data.br") || n.endsWith(".data.gz")
-  );
-  const hasWasm = fileNames.some(
-    (n) => n.endsWith(".wasm") || n.endsWith(".wasm.br") || n.endsWith(".wasm.gz")
-  );
+  const hasData = fileNames.some((n) => n.endsWith(".data") || n.endsWith(".data.br") || n.endsWith(".data.gz"));
+  const hasWasm = fileNames.some((n) => n.endsWith(".wasm") || n.endsWith(".wasm.br") || n.endsWith(".wasm.gz"));
 
   return {
     hasIndex: false,
@@ -101,13 +95,7 @@ function scoreHosts(scan: ScanLike): { scores: HostScore[]; recommended: HostSco
 
   const baseReadiness = clamp(quick);
 
-  function make(
-    slug: HostSlug,
-    base: number,
-    reasons: string[],
-    compatible: boolean,
-    fixpackRequired: boolean
-  ) {
+  function make(slug: HostSlug, base: number, reasons: string[], compatible: boolean, fixpackRequired: boolean) {
     const compliant = !needsHeaders || fixpackRequired;
     const certified = compatible && structure.deployable;
 
@@ -119,15 +107,7 @@ function scoreHosts(scan: ScanLike): { scores: HostScore[]; recommended: HostSco
         (slug === "github_pages" && !needsHeaders ? 10 : 0)
     );
 
-    return {
-      slug,
-      score,
-      certified,
-      compliant,
-      compatible,
-      reasons,
-      fixpackRequired,
-    } satisfies HostScore;
+    return { slug, score, certified, compliant, compatible, reasons, fixpackRequired } satisfies HostScore;
   }
 
   const scores: HostScore[] = [];
@@ -219,59 +199,59 @@ function getContentType(req: NextRequest) {
 }
 
 function decodeBase64ToBuffer(b64: string): Buffer {
-  // Allow data:...;base64,xxxx
   const comma = b64.indexOf(",");
   const raw = comma >= 0 ? b64.slice(comma + 1) : b64;
   return Buffer.from(raw, "base64");
 }
 
-async function parseUpload(req: NextRequest): Promise<{
-  buffer: Buffer;
-  projectName: string;
-  originalName: string;
-}> {
+// Returns either a scan (from JSON) OR a buffer (from ZIP upload)
+async function parseIncoming(req: NextRequest): Promise<
+  | { mode: "scan"; scan: ScanLike; projectName: string }
+  | { mode: "zip"; buffer: Buffer; projectName: string; originalName: string }
+> {
   const ct = getContentType(req);
 
-  // 1) multipart/form-data (normal browser upload)
+  // JSON mode: accept either { scan } OR { zipBase64 }
+  if (ct.includes("application/json")) {
+    const body = await req.json().catch(() => null);
+
+    const projectName =
+      typeof body?.projectName === "string" && body.projectName.trim() ? body.projectName.trim() : "Default Project";
+
+    // ✅ Accept client scan
+    if (body?.scan && typeof body.scan === "object") {
+      return { mode: "scan", scan: body.scan, projectName };
+    }
+
+    // Accept base64 zip
+    const zipBase64 = body?.zipBase64 || body?.zip_b64 || body?.zip;
+    if (zipBase64 && typeof zipBase64 === "string") {
+      const originalName =
+        typeof body?.filename === "string" && body.filename.trim() ? body.filename.trim() : "build.zip";
+      const buffer = decodeBase64ToBuffer(zipBase64);
+      return { mode: "zip", buffer, projectName, originalName };
+    }
+
+    throw new Error(
+      'Invalid JSON body. Expected either { "scan": {..}, "projectName": "..." } OR { "zipBase64": "<base64>", "projectName": "..." }.'
+    );
+  }
+
+  // multipart/form-data
   if (ct.includes("multipart/form-data")) {
     const form = await req.formData();
     const file = form.get("file") as File | null;
 
-    if (!file) {
-      throw new Error("Missing ZIP file (expected form field: file)");
-    }
+    if (!file) throw new Error("Missing ZIP file (expected form field: file)");
 
     const projectName = (form.get("projectName") as string) || "Default Project";
     const originalName = (file as any)?.name ? String((file as any).name) : "build.zip";
-
     const buffer = Buffer.from(await file.arrayBuffer());
-    return { buffer, projectName, originalName };
+
+    return { mode: "zip", buffer, projectName, originalName };
   }
 
-  // 2) JSON (support base64 ZIP posts)
-  if (ct.includes("application/json")) {
-    const body = await req.json().catch(() => null);
-    const zipBase64 = body?.zipBase64 || body?.zip_b64 || body?.zip;
-
-    if (!zipBase64 || typeof zipBase64 !== "string") {
-      throw new Error(
-        'Invalid JSON body. Expected { "zipBase64": "<base64>" } (optionally with "projectName").'
-      );
-    }
-
-    const projectName = typeof body?.projectName === "string" && body.projectName.trim()
-      ? body.projectName.trim()
-      : "Default Project";
-
-    const originalName = typeof body?.filename === "string" && body.filename.trim()
-      ? body.filename.trim()
-      : "build.zip";
-
-    const buffer = decodeBase64ToBuffer(zipBase64);
-    return { buffer, projectName, originalName };
-  }
-
-  // 3) Raw bytes (application/octet-stream)
+  // raw bytes
   if (ct.includes("application/octet-stream") || ct.includes("application/zip")) {
     const ab = await req.arrayBuffer();
     const buffer = Buffer.from(ab);
@@ -280,12 +260,12 @@ async function parseUpload(req: NextRequest): Promise<{
     const originalName = req.headers.get("x-filename") || "build.zip";
 
     if (!buffer.length) throw new Error("Empty request body (expected ZIP bytes).");
-    return { buffer, projectName, originalName };
+
+    return { mode: "zip", buffer, projectName, originalName };
   }
 
-  // Unsupported
   throw new Error(
-    `Unsupported Content-Type: "${ct || "missing"}". Use multipart/form-data (recommended), or application/json (base64), or application/octet-stream.`
+    `Unsupported Content-Type: "${ct || "missing"}". Use application/json (scan or base64 zip), multipart/form-data, or application/octet-stream.`
   );
 }
 
@@ -293,7 +273,6 @@ export async function POST(req: NextRequest) {
   try {
     // ---------- AUTH ----------
     const session = await getServerSession(authOptions);
-
     if (!session?.user?.email) {
       return NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 });
     }
@@ -305,11 +284,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "User not found" }, { status: 404 });
     }
 
-    // ---------- FILE ----------
-    const { buffer, projectName } = await parseUpload(req);
+    // ---------- INPUT ----------
+    const incoming = await parseIncoming(req);
 
-    // ---------- RUN SCAN ----------
-    const scan = await scanWebglBuildZip(buffer);
+    const projectName = incoming.projectName;
+
+    // ---------- SCAN ----------
+    const scan =
+      incoming.mode === "scan"
+        ? incoming.scan
+        : await scanWebglBuildZip(incoming.buffer);
 
     // ---------- HOST SCORING ----------
     const hostScoring = scoreHosts(scan);
@@ -337,7 +321,6 @@ export async function POST(req: NextRequest) {
     // ---------- CERT ID ----------
     const certId = await generateCertId();
 
-    // Safe guards for scan fields
     const quickScore = Number.isFinite(scan?.quick_score) ? Number(scan.quick_score) : 0;
     const brotliPresent = !!scan?.compression?.brotli_present;
     const gzipPresent = !!scan?.compression?.gzip_present;
@@ -363,9 +346,7 @@ export async function POST(req: NextRequest) {
     });
 
     // ---------- OPTIONAL Host table linkage ----------
-    const hostRow = await prisma.host
-      .findUnique({ where: { slug: recommendedHost } })
-      .catch(() => null);
+    const hostRow = await prisma.host.findUnique({ where: { slug: recommendedHost } }).catch(() => null);
 
     // ---------- UPSERT LaunchProfile ----------
     await prisma.launchProfile.upsert({
@@ -417,8 +398,7 @@ export async function POST(req: NextRequest) {
     const msg = err?.message || "Scan failed";
     console.error("SCAN ERROR", err);
 
-    // If it's the content-type mismatch, return 415 (Unsupported Media Type) to be explicit
-    const ct = msg.toLowerCase().includes("unsupported content-type");
-    return NextResponse.json({ ok: false, error: msg }, { status: ct ? 415 : 500 });
+    const isUnsupported = msg.toLowerCase().includes("unsupported content-type");
+    return NextResponse.json({ ok: false, error: msg }, { status: isUnsupported ? 415 : 500 });
   }
 }
