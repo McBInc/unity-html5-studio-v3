@@ -12,22 +12,6 @@ type MePayload =
 
 type HostKey = "vercel" | "netlify" | "nginx" | "apache" | "generic";
 
-type ScanBuildApiResponse =
-  | {
-      ok: true;
-      buildId: string;
-      certId: string;
-      reportUrl: string;
-      quickScore: number;
-      recommendedHost: string;
-      hostCompatibilityScore: number;
-
-      // The server scanner currently stores scanResult in DB, but it may not return it.
-      // If you update /api/scanbuild to return scan too, we’ll render richer UI.
-      scan?: ScanResponse;
-    }
-  | { ok: false; error: string };
-
 function recommendHostFromScan(scan: ScanResponse | null): { host: HostKey; label: string; reason: string } {
   if (!scan) return { host: "netlify", label: "Netlify", reason: "Reliable default for first-time online testing." };
   if (scan.compression?.brotli_present)
@@ -111,10 +95,8 @@ export default function HomePage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // The scan we use for FixPack generation + UI details.
   const [scan, setScan] = useState<ScanResponse | null>(null);
 
-  // Saved build info (from server)
   const [savedBuildId, setSavedBuildId] = useState<string | null>(null);
   const [certId, setCertId] = useState<string | null>(null);
   const [reportUrl, setReportUrl] = useState<string | null>(null);
@@ -128,17 +110,13 @@ export default function HomePage() {
     try {
       const savedProject = localStorage.getItem(PROJECT_KEY) || "Untitled Game";
       setProjectName(savedProject);
-    } catch {
-      // ignore
-    }
+    } catch {}
   }, []);
 
   useEffect(() => {
     try {
       localStorage.setItem(PROJECT_KEY, projectName || "Untitled Game");
-    } catch {
-      // ignore
-    }
+    } catch {}
   }, [projectName]);
 
   async function refreshMe() {
@@ -146,9 +124,7 @@ export default function HomePage() {
       const res = await fetch("/api/me", { cache: "no-store" });
       const json = (await res.json()) as MePayload;
       setMe(json);
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   useEffect(() => {
@@ -180,7 +156,27 @@ export default function HomePage() {
     };
   }
 
-  async function runServerScan() {
+  async function persistScan(s: ScanResponse) {
+    const res = await fetch("/api/scanbuild", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectName: projectName || "Untitled Game",
+        scan: s,
+        buildSizeMB: file ? Math.round(file.size / 1024 / 1024) : undefined,
+        source: "client",
+      }),
+    });
+
+    const payload = await res.json().catch(() => null);
+    if (!res.ok || !payload?.ok) throw new Error(payload?.error || "Failed to save scan");
+
+    if (payload?.buildId) setSavedBuildId(payload.buildId);
+    if (payload?.certId) setCertId(payload.certId);
+    if (payload?.reportUrl) setReportUrl(payload.reportUrl);
+  }
+
+  async function runScan() {
     if (!file) return;
 
     setBusy(true);
@@ -191,42 +187,107 @@ export default function HomePage() {
     setReportUrl(null);
 
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("projectName", projectName || "Untitled Game");
+      const ab = await file.arrayBuffer();
+      const zip = await JSZip.loadAsync(ab);
 
-      // IMPORTANT: do NOT set Content-Type header when using FormData
-      const res = await fetch("/api/scanbuild", {
-        method: "POST",
-        body: fd,
-      });
+      const entries = Object.values(zip.files).filter((z) => !z.dir);
+      const lower = (s: string) => s.toLowerCase();
 
-      const payload = (await res.json().catch(() => null)) as ScanBuildApiResponse | null;
+      const brotli_present = entries.some((e) => lower(e.name).endsWith(".br"));
+      const gzip_present = entries.some((e) => lower(e.name).endsWith(".gz"));
 
-      if (!res.ok || !payload || payload.ok === false) {
-        throw new Error((payload as any)?.error || `Scan failed (${res.status})`);
+      const loaderFiles = entries
+        .filter((e) => lower(e.name).endsWith(".js"))
+        .filter((e) => lower(e.name).includes("loader"));
+
+      let memory_settings_detected_bytes: number[] = [];
+      for (const lf of loaderFiles.slice(0, 5)) {
+        try {
+          const text = await zip.file(lf.name)!.async("string");
+          const matches = [...text.matchAll(/(TOTAL_MEMORY|totalMemory|memory)\s*[:=]\s*(\d{7,12})/g)];
+          for (const m of matches) {
+            const n = Number(m[2]);
+            if (Number.isFinite(n) && n > 32 * 1024 * 1024 && n < 8 * 1024 * 1024 * 1024) {
+              memory_settings_detected_bytes.push(n);
+            }
+          }
+        } catch {}
       }
+      memory_settings_detected_bytes = Array.from(new Set(memory_settings_detected_bytes)).sort((a, b) => a - b);
 
-      setSavedBuildId(payload.buildId);
-      setCertId(payload.certId);
-      setReportUrl(payload.reportUrl);
+      const hasSuffix = (name: string, suffixes: string[]) => suffixes.some((s) => lower(name).endsWith(s));
+      const hasData = entries.some((e) => hasSuffix(e.name, [".data", ".data.br", ".data.gz"]));
+      const hasWasm = entries.some((e) => hasSuffix(e.name, [".wasm", ".wasm.br", ".wasm.gz"]));
+      const hasLoader = loaderFiles.length > 0;
 
-      // If your API returns scan in the response, use it.
-      if ((payload as any).scan) {
-        const s = (payload as any).scan as ScanResponse;
-        setScan(s);
+      let quick_score = 50;
+      if (brotli_present) quick_score += 20;
+      if (gzip_present) quick_score += 10;
+      if (hasData && hasWasm && hasLoader) quick_score += 15;
+      if (!hasWasm) quick_score -= 25;
+      if (!hasLoader) quick_score -= 25;
+      quick_score = Math.max(0, Math.min(100, quick_score));
 
-        // auto host selection
-        const rec = recommendHostFromScan(s);
-        setTargetHost(rec.host);
-      } else {
-        // Minimal fallback UI: we can still let user download FixPacks,
-        // but only if we have scan. For now, require API to return scan.
-        setErr(
-          "Scan saved, but the API did not return scan details yet. Update /api/scanbuild to include { scan } in response so FixPack generation can work."
-        );
-      }
+      const hosting_checks: { check: string; severity: "info" | "medium" | "high" }[] = [];
+      if (brotli_present)
+        hosting_checks.push({ check: "Brotli assets detected (.br). Host must send Content-Encoding: br.", severity: "high" });
+      if (gzip_present)
+        hosting_checks.push({ check: "Gzip assets detected (.gz). Host must send Content-Encoding: gzip.", severity: "medium" });
+      hosting_checks.push({ check: "Ensure .wasm is served with MIME type: application/wasm", severity: "high" });
+      hosting_checks.push({ check: "Set long cache headers for immutable build files to improve load speed.", severity: "info" });
 
+      const IMPORTANT_SUFFIXES = [
+        ".data",
+        ".data.br",
+        ".data.gz",
+        ".wasm",
+        ".wasm.br",
+        ".wasm.gz",
+        ".framework.js",
+        ".framework.js.br",
+        ".framework.js.gz",
+        ".loader.js",
+        ".loader.js.br",
+        ".loader.js.gz",
+        "index.html",
+      ];
+
+      const isImportant = (name: string) => {
+        const n = lower(name);
+        return IMPORTANT_SUFFIXES.some((suf) => n.endsWith(suf)) || n.includes("build/");
+      };
+
+      const targets = [...entries.filter((e) => isImportant(e.name)), ...entries.filter((e) => !isImportant(e.name)).slice(0, 25)];
+      const uniqTargets = Array.from(new Map(targets.map((t) => [t.name, t])).values());
+
+      const files = await Promise.all(
+        uniqTargets.map(async (e) => {
+          try {
+            const buf = await zip.file(e.name)!.async("arraybuffer");
+            return { name: e.name, size_bytes: buf.byteLength, sha256: "local-scan" };
+          } catch {
+            return { name: e.name, size_bytes: 0, sha256: "local-scan" };
+          }
+        })
+      );
+      files.sort((a, b) => b.size_bytes - a.size_bytes);
+
+      const s: ScanResponse = {
+        kind: "webgl_build_scan",
+        quick_score,
+        compression: { brotli_present, gzip_present },
+        memory_settings_detected_bytes,
+        files,
+        hosting_checks,
+        scanned_at: new Date().toISOString(),
+      };
+
+      setScan(s);
+
+      const rec = recommendHostFromScan(s);
+      setTargetHost(rec.host);
+
+      await persistScan(s);
       await refreshMe();
     } catch (e: any) {
       setErr(e?.message || "Scan failed");
@@ -247,23 +308,14 @@ export default function HomePage() {
     URL.revokeObjectURL(url);
   }
 
-  /**
-   * Builds a FixPack ZIP that includes the Unity build files + config + README.
-   * Two modes:
-   * - repo-ready: zip root is the website root (index.html at root)
-   * - handover: zip contains <game>_<host>_fixpack/deploy/... (client-safe)
-   */
   async function downloadFixPackZip(mode: "repo-ready" | "handover") {
-    if (!scan) {
-      setErr("Run a scan first (so we know what headers/config you need).");
-      return;
-    }
+    if (!scan) return;
     if (!file) {
       setErr("Please upload a WebGL.zip first.");
       return;
     }
 
-    // Gate usage for FixPack downloads (NOT for scanning)
+    // Gate usage (customers). Scan is free.
     const gate = await fetch("/api/fixpacks/use", { method: "POST" });
     const gateJson = await gate.json().catch(() => null);
     if (!gate.ok) {
@@ -289,15 +341,13 @@ export default function HomePage() {
       const { prefix } = findUnityRootPrefix(entryNames);
 
       if (prefix === null) {
-        setErr(
-          "Could not find Unity WebGL root inside this zip. Expected to find index.html with sibling Build/ and TemplateData/ folders somewhere inside."
-        );
+        setErr("Could not find Unity WebGL root inside this zip. Expected index.html with sibling Build/ and TemplateData/ folders.");
         return;
       }
 
       const unityPrefix = prefix || "";
-
       const outZip = new JSZip();
+
       const gameSlug = slugify(projectName);
       const hostSlug = targetHost === "generic" ? "generic" : targetHost;
 
@@ -383,35 +433,11 @@ export default function HomePage() {
         </p>
 
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
-          <button
-            onClick={() => signIn(undefined, { callbackUrl: "/" })}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 10,
-              border: "1px solid #111",
-              background: "#111",
-              color: "#fff",
-              cursor: "pointer",
-              fontWeight: 900,
-            }}
-            type="button"
-          >
+          <button onClick={() => signIn(undefined, { callbackUrl: "/" })} style={primaryBtn} type="button">
             Sign in (Email)
           </button>
 
-          <button
-            onClick={() => signIn("github", { callbackUrl: "/" })}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 10,
-              border: "1px solid #111",
-              background: "#111",
-              color: "#fff",
-              cursor: "pointer",
-              fontWeight: 900,
-            }}
-            type="button"
-          >
+          <button onClick={() => signIn("github", { callbackUrl: "/" })} style={primaryBtn} type="button">
             Sign in with GitHub
           </button>
         </div>
@@ -423,10 +449,10 @@ export default function HomePage() {
     <div>
       <h1 style={{ fontSize: 34, margin: "8px 0 8px" }}>Stop WebGL hosting failures — instantly</h1>
       <p style={{ opacity: 0.8, lineHeight: 1.5, maxWidth: 760 }}>
-        Upload a <b>Unity WebGL build ZIP</b>. We certify deployment readiness and generate a host-ready Fix Pack.
+        Upload a <b>Unity WebGL build ZIP</b>. We score deployment readiness and generate a host-ready Fix Pack.
       </p>
 
-      {/* Step 1: Scan (server-side) */}
+      {/* Step 1: Scan */}
       <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 16, flexWrap: "wrap" }}>
         <input
           type="text"
@@ -439,7 +465,7 @@ export default function HomePage() {
         <input type="file" accept=".zip" onChange={(e) => setFile(e.target.files?.[0] || null)} />
 
         <button
-          onClick={runServerScan}
+          onClick={runScan}
           disabled={!file || busy}
           style={{
             padding: "10px 14px",
@@ -452,7 +478,7 @@ export default function HomePage() {
           }}
           type="button"
         >
-          {busy ? "Scanning…" : "Run Certification Scan"}
+          {busy ? "Scanning…" : "Run Quick Scan"}
         </button>
 
         <span style={{ fontSize: 12, opacity: 0.75 }}>
@@ -466,45 +492,26 @@ export default function HomePage() {
       {(savedBuildId || certId || reportUrl) && (
         <div style={{ marginTop: 12, padding: 12, borderRadius: 12, border: "1px solid #e5e7eb", background: "#fafafa", maxWidth: 760 }}>
           <div style={{ fontWeight: 900 }}>✅ Saved</div>
+
           {savedBuildId && (
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
               Build ID: <span style={{ fontFamily: "monospace" }}>{savedBuildId}</span>
             </div>
           )}
+
           {certId && (
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
               Cert ID: <span style={{ fontFamily: "monospace" }}>{certId}</span>
             </div>
           )}
+
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-            <a
-              href="/history"
-              style={{
-                padding: "10px 14px",
-                borderRadius: 10,
-                border: "1px solid #111",
-                background: "#111",
-                color: "#fff",
-                fontWeight: 900,
-                textDecoration: "none",
-              }}
-            >
+            <a href="/history" style={linkBtn}>
               View in History →
             </a>
 
             {reportUrl && (
-              <a
-                href={reportUrl}
-                style={{
-                  padding: "10px 14px",
-                  borderRadius: 10,
-                  border: "1px solid #111",
-                  background: "#111",
-                  color: "#fff",
-                  fontWeight: 900,
-                  textDecoration: "none",
-                }}
-              >
+              <a href={reportUrl} style={linkBtn}>
                 Open Certification Report →
               </a>
             )}
@@ -520,7 +527,6 @@ export default function HomePage() {
             <div style={{ fontSize: 13, opacity: 0.7 }}>{scan.scanned_at}</div>
           </div>
 
-          {/* Summary Card */}
           {scoreInfo && (
             <div style={{ marginTop: 12, padding: 14, borderRadius: 12, border: "1px solid #eee", background: "#fafafa" }}>
               <div style={{ fontWeight: 900, fontSize: 14 }}>
@@ -548,57 +554,18 @@ export default function HomePage() {
                   </select>
                 </div>
 
-                <button
-                  onClick={() => downloadFixPackZip("repo-ready")}
-                  disabled={busy}
-                  style={{
-                    padding: "10px 14px",
-                    borderRadius: 10,
-                    border: "1px solid #111",
-                    background: busy ? "#ddd" : "#111",
-                    color: "#fff",
-                    cursor: busy ? "not-allowed" : "pointer",
-                    fontWeight: 900,
-                  }}
-                  type="button"
-                >
+                <button onClick={() => downloadFixPackZip("repo-ready")} disabled={busy} style={primaryBtn} type="button">
                   🚀 Download FixPack (Repo-Ready)
                 </button>
 
-                <button
-                  onClick={() => downloadFixPackZip("handover")}
-                  disabled={busy}
-                  style={{
-                    padding: "10px 14px",
-                    borderRadius: 10,
-                    border: "1px solid #111",
-                    background: busy ? "#ddd" : "#111",
-                    color: "#fff",
-                    cursor: busy ? "not-allowed" : "pointer",
-                    fontWeight: 900,
-                  }}
-                  type="button"
-                >
+                <button onClick={() => downloadFixPackZip("handover")} disabled={busy} style={primaryBtn} type="button">
                   📦 Download FixPack (Client Handover)
                 </button>
 
                 {isFreeLimitReached && (
                   <div style={{ padding: 12, borderRadius: 10, border: "1px solid #eee", background: "#fff" }}>
                     <div style={{ fontWeight: 900 }}>Free limit reached</div>
-                    <button
-                      onClick={() => (window.location.href = "/pricing")}
-                      style={{
-                        marginTop: 6,
-                        padding: "8px 12px",
-                        borderRadius: 8,
-                        border: "1px solid #111",
-                        background: "#111",
-                        color: "#fff",
-                        cursor: "pointer",
-                        fontWeight: 800,
-                      }}
-                      type="button"
-                    >
+                    <button onClick={() => (window.location.href = "/pricing")} style={primaryBtn} type="button">
                       Upgrade — Unlimited Deployments
                     </button>
                   </div>
@@ -611,14 +578,12 @@ export default function HomePage() {
             </div>
           )}
 
-          {/* Compact KPIs */}
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 12 }}>
             <Kpi label="Brotli" value={scan.compression?.brotli_present ? "Yes" : "No"} />
             <Kpi label="Gzip" value={scan.compression?.gzip_present ? "Yes" : "No"} />
             <Kpi label="Memory (detected)" value={humanMem || "Not found"} />
           </div>
 
-          {/* Details */}
           <details style={{ marginTop: 16 }}>
             <summary style={{ cursor: "pointer", fontWeight: 900 }}>Hosting checks</summary>
             <ul style={{ marginTop: 10, lineHeight: 1.6 }}>
@@ -630,7 +595,6 @@ export default function HomePage() {
             </ul>
           </details>
 
-          {/* Config */}
           {fixPack && (
             <details style={{ marginTop: 12 }} open>
               <summary style={{ cursor: "pointer", fontWeight: 900 }}>Fix Pack files for {hostLabel(targetHost)}</summary>
@@ -688,10 +652,6 @@ export default function HomePage() {
   );
 }
 
-/**
- * Accessibility-safe ConfigBlock:
- * - No interactive element inside <summary>
- */
 function ConfigBlock({ title, content, onCopy }: { title: string; content: string; onCopy: () => void }) {
   const [open, setOpen] = useState(false);
 
@@ -749,6 +709,26 @@ function Kpi({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
+const primaryBtn: React.CSSProperties = {
+  padding: "10px 14px",
+  borderRadius: 10,
+  border: "1px solid #111",
+  background: "#111",
+  color: "#fff",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const linkBtn: React.CSSProperties = {
+  padding: "10px 14px",
+  borderRadius: 10,
+  border: "1px solid #111",
+  background: "#111",
+  color: "#fff",
+  fontWeight: 900,
+  textDecoration: "none",
+};
 
 const ghostBtn: React.CSSProperties = {
   padding: "10px 12px",
