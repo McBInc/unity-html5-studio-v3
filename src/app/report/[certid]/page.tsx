@@ -1,7 +1,7 @@
-// src/app/report/[certId]/page.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import { useSession } from "next-auth/react";
 
 type ReportPayload =
   | {
@@ -15,12 +15,20 @@ type ReportPayload =
       gzipPresent: boolean;
       scan: any;
       launchProfile: any;
+      reportStatus?: string | null;
+      certifiedAt?: string | Date | null;
+      liveUrl?: string | null;
+      clipUrl?: string | null;
     }
   | { ok: false; error: string };
 
+type MePayload =
+  | { ok: true; email: string; fixPackUses?: number; remainingFreeUses?: number; subscriptionActive?: boolean }
+  | { error: string };
+
 function scoreBand(score: number) {
   if (score >= 90) return { label: "Certified: Ready", note: "Low risk of hosting-related failures." };
-  if (score >= 75) return { label: "Certified: Deployable", note: "Should work — Fix Pack reduces edge cases." };
+  if (score >= 75) return { label: "Certified: Deployable", note: "Should work — edge cases may remain." };
   if (score >= 50) return { label: "Conditional", note: "Likely to fail unless hosting is configured correctly." };
   if (score >= 25) return { label: "High Risk", note: "Very likely to fail online unless corrected." };
   return { label: "Fail", note: "Critical WebGL components or assumptions are missing." };
@@ -36,32 +44,87 @@ function fmtDate(d: any) {
   }
 }
 
-export default function ReportPage({ params }: { params: { certId: string } }) {
-  const certId = params.certId;
+function safeString(v: any) {
+  return typeof v === "string" ? v : v == null ? "" : String(v);
+}
+
+export default function ReportPage(props: any) {
+  // Bulletproof param handling (case + cache-safe)
+  const certId =
+    props?.params?.certId ||
+    props?.params?.CertId ||
+    props?.params?.certID ||
+    props?.params?.CERTID ||
+    "";
+
+  const { status } = useSession();
 
   const [data, setData] = useState<ReportPayload | null>(null);
+  const [me, setMe] = useState<MePayload | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      setLoading(true);
-      try {
-        const res = await fetch(`/api/report/${encodeURIComponent(certId)}`, { cache: "no-store" });
-        const json = (await res.json()) as ReportPayload;
-        if (!alive) return;
-        setData(json);
-      } catch (e: any) {
-        if (!alive) return;
-        setData({ ok: false, error: e?.message || "Failed to load report" });
-      } finally {
-        if (alive) setLoading(false);
+  // Admin panel state
+  const [liveUrlInput, setLiveUrlInput] = useState("");
+  const [issuing, setIssuing] = useState(false);
+  const [issueMsg, setIssueMsg] = useState<string | null>(null);
+
+  const PUBLIC_ADMIN_EMAIL = (process.env.NEXT_PUBLIC_ADMIN_EMAIL || "").toLowerCase();
+
+  async function loadReport() {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/report/${encodeURIComponent(certId)}`, { cache: "no-store" });
+      const json = (await res.json()) as ReportPayload;
+      setData(json);
+
+      // If report already has a liveUrl, prefill the input
+      if ("ok" in json && json.ok) {
+        const existing = safeString(json.liveUrl || "");
+        setLiveUrlInput(existing);
       }
-    })();
-    return () => {
-      alive = false;
-    };
+    } catch (e: any) {
+      setData({ ok: false, error: e?.message || "Failed to load report" });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadMe() {
+    try {
+      const res = await fetch("/api/me", { cache: "no-store" });
+      const json = (await res.json()) as MePayload;
+      setMe(json);
+    } catch {
+      // ignore
+    }
+  }
+
+  useEffect(() => {
+    if (!certId) {
+      setData({ ok: false, error: "Missing certId in URL" });
+      setLoading(false);
+      return;
+    }
+    void loadReport();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [certId]);
+
+  useEffect(() => {
+    if (status === "authenticated") void loadMe();
+    else setMe(null);
+  }, [status]);
+
+  const isAdmin = useMemo(() => {
+    const email = me && "ok" in me && (me as any).ok ? String((me as any).email || "").toLowerCase() : "";
+    if (!email) return false;
+
+    // If NEXT_PUBLIC_ADMIN_EMAIL is set, gate panel by it.
+    if (PUBLIC_ADMIN_EMAIL) return email === PUBLIC_ADMIN_EMAIL;
+
+    // If not set, still allow showing the panel to any authed user,
+    // but the server endpoint will enforce true admin access.
+    return status === "authenticated";
+  }, [me, PUBLIC_ADMIN_EMAIL, status]);
 
   const score = useMemo(() => {
     if (!data || !("ok" in data) || !data.ok) return 0;
@@ -69,6 +132,16 @@ export default function ReportPage({ params }: { params: { certId: string } }) {
   }, [data]);
 
   const band = useMemo(() => scoreBand(score), [score]);
+
+  const reportStatus = useMemo(() => {
+    if (!data || !("ok" in data) || !data.ok) return null;
+    return safeString((data as any).reportStatus || "");
+  }, [data]);
+
+  const liveUrl = useMemo(() => {
+    if (!data || !("ok" in data) || !data.ok) return "";
+    return safeString((data as any).liveUrl || "");
+  }, [data]);
 
   const recommendedHost = useMemo(() => {
     if (!data || !("ok" in data) || !data.ok) return null;
@@ -85,6 +158,41 @@ export default function ReportPage({ params }: { params: { certId: string } }) {
     return [];
   }, [data]);
 
+  async function issueCertificate() {
+    setIssueMsg(null);
+
+    const liveUrlTrim = liveUrlInput.trim();
+    if (!liveUrlTrim) {
+      setIssueMsg("Please paste a Live URL first.");
+      return;
+    }
+
+    setIssuing(true);
+    try {
+      const res = await fetch("/api/admin/set-live", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ certId, liveUrl: liveUrlTrim }),
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const msg = json?.error || json?.message || `Issue failed (${res.status})`;
+        setIssueMsg(msg);
+        return;
+      }
+
+      setIssueMsg("✅ Certificate issued. Refreshing report…");
+      await loadReport();
+      setIssueMsg("✅ Certificate issued.");
+    } catch (e: any) {
+      setIssueMsg(e?.message || "Issue failed");
+    } finally {
+      setIssuing(false);
+    }
+  }
+
   if (loading) {
     return (
       <div style={{ padding: 20, maxWidth: 980, margin: "0 auto" }}>
@@ -100,7 +208,7 @@ export default function ReportPage({ params }: { params: { certId: string } }) {
         <h1 style={{ fontSize: 28, margin: 0 }}>Certification Report</h1>
         <div style={{ marginTop: 12, padding: 14, border: "1px solid #eee", borderRadius: 12, background: "#fff" }}>
           <div style={{ fontWeight: 900, color: "crimson" }}>Report unavailable</div>
-          <div style={{ marginTop: 6, opacity: 0.85 }}>{data?.error || "Unknown error"}</div>
+          <div style={{ marginTop: 6, opacity: 0.85 }}>{(data as any)?.error || "Unknown error"}</div>
           <div style={{ marginTop: 12 }}>
             <a href="/" style={btnLink}>
               Back to Scan →
@@ -127,12 +235,14 @@ export default function ReportPage({ params }: { params: { certId: string } }) {
         </div>
       </div>
 
-      {/* Hero */}
+      {/* HERO */}
       <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#fafafa" }}>
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
-          <div style={{ minWidth: 220 }}>
-            <div style={{ fontSize: 12, opacity: 0.7 }}>Certification Status</div>
-            <div style={{ fontSize: 18, fontWeight: 900 }}>{band.label}</div>
+          <div style={{ minWidth: 260 }}>
+            <div style={{ fontSize: 12, opacity: 0.7 }}>Certificate Status</div>
+            <div style={{ fontSize: 18, fontWeight: 900 }}>
+              {reportStatus ? reportStatus.toUpperCase() : "DRAFT"} — {band.label}
+            </div>
             <div style={{ marginTop: 6, opacity: 0.85 }}>{band.note}</div>
           </div>
 
@@ -166,7 +276,27 @@ export default function ReportPage({ params }: { params: { certId: string } }) {
         </div>
       </div>
 
-      {/* Recommended host */}
+      {/* LIVE URL SECTION */}
+      <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#fff" }}>
+        <div style={{ fontWeight: 900, marginBottom: 6 }}>Certified Deployment</div>
+
+        {liveUrl ? (
+          <div style={{ opacity: 0.9 }}>
+            Live URL:{" "}
+            <a href={liveUrl} target="_blank" rel="noreferrer" style={{ fontWeight: 900 }}>
+              {liveUrl}
+            </a>
+          </div>
+        ) : (
+          <div style={{ opacity: 0.75 }}>Live URL: Pending (not issued yet)</div>
+        )}
+
+        <div style={{ marginTop: 10, opacity: 0.8 }}>
+          Issued at: {"certifiedAt" in data ? fmtDate((data as any).certifiedAt) : "—"}
+        </div>
+      </div>
+
+      {/* RECOMMENDED HOST */}
       <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#fff" }}>
         <div style={{ fontWeight: 900, marginBottom: 6 }}>Recommended Host</div>
         {recommendedHost ? (
@@ -179,12 +309,9 @@ export default function ReportPage({ params }: { params: { certId: string } }) {
         ) : (
           <div style={{ opacity: 0.75 }}>No host recommendation available yet.</div>
         )}
-        <div style={{ marginTop: 10, opacity: 0.8 }}>
-          Next step: generate a Fix Pack for the recommended host from the scan page.
-        </div>
       </div>
 
-      {/* Checks */}
+      {/* HOSTING CHECKS */}
       <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#fff" }}>
         <div style={{ fontWeight: 900, marginBottom: 8 }}>Hosting Checks</div>
         {checks.length ? (
@@ -201,7 +328,52 @@ export default function ReportPage({ params }: { params: { certId: string } }) {
         )}
       </div>
 
-      {/* Raw scan (collapsible) */}
+      {/* ADMIN PANEL */}
+      {isAdmin && (
+        <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #111", background: "#fff" }}>
+          <div style={{ fontWeight: 900, marginBottom: 8 }}>Admin — Issue Certificate</div>
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <input
+              value={liveUrlInput}
+              onChange={(e) => setLiveUrlInput(e.target.value)}
+              placeholder="Paste the certified deployment Live URL (https://...)"
+              style={{
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: "1px solid #ddd",
+                minWidth: 360,
+                flex: 1,
+              }}
+            />
+
+            <button
+              onClick={issueCertificate}
+              disabled={issuing}
+              style={{
+                padding: "10px 14px",
+                borderRadius: 10,
+                border: "1px solid #111",
+                background: issuing ? "#ddd" : "#111",
+                color: "#fff",
+                cursor: issuing ? "not-allowed" : "pointer",
+                fontWeight: 900,
+              }}
+              type="button"
+            >
+              {issuing ? "Issuing…" : "Issue Certificate"}
+            </button>
+          </div>
+
+          {issueMsg && <div style={{ marginTop: 10, opacity: 0.9 }}>{issueMsg}</div>}
+
+          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
+            This will set <b>Build.liveUrl</b>, set <b>reportStatus</b> to <b>issued</b>, and timestamp <b>certifiedAt</b>.
+          </div>
+        </div>
+      )}
+
+      {/* RAW SCAN */}
       <details style={{ marginTop: 16 }}>
         <summary style={{ cursor: "pointer", fontWeight: 900 }}>Raw Scan JSON</summary>
         <pre
@@ -215,7 +387,7 @@ export default function ReportPage({ params }: { params: { certId: string } }) {
             fontSize: 12,
           }}
         >
-          {JSON.stringify(data.scan, null, 2)}
+          {JSON.stringify((data as any).scan, null, 2)}
         </pre>
       </details>
     </div>
