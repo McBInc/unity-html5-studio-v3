@@ -93,6 +93,7 @@ export default function ReportClient({ certId, initial }: { certId: string; init
   async function issueCertificate() {
     setIssueMsg(null);
     const liveUrlTrim = liveUrlInput.trim();
+    if (!certId) return setIssueMsg("Internal error: missing certId prop");
     if (!liveUrlTrim) return setIssueMsg("Please paste a Live URL first.");
 
     setIssuing(true);
@@ -100,7 +101,8 @@ export default function ReportClient({ certId, initial }: { certId: string; init
       const res = await fetch("/api/admin/set-live", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ certId, liveUrl: liveUrlTrim }),
+        body: JSON.stringify({ certId: String(certId),
+                              liveUrl: liveUrlTrim, }),
       });
       const json = await res.json().catch(() => null);
 
