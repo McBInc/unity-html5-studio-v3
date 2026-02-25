@@ -52,6 +52,7 @@ export default function ReportPage(props: any) {
   // Bulletproof param handling (case + cache-safe)
   const certId =
     props?.params?.certId ||
+    props?.params?.certid ||
     props?.params?.CertId ||
     props?.params?.certID ||
     props?.params?.CERTID ||
