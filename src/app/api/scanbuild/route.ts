@@ -511,6 +511,9 @@ const platformTarget = (() => {
         certId,
         reportStatus: "draft",
         certifiedAt: new Date(),
+
+        // ✅ ADD HERE (TypeScript, not Prisma schema)
+    platformTarget: platformTarget as any,
       },
     });
 

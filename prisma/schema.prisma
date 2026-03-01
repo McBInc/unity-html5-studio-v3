@@ -139,7 +139,7 @@ model Build {
   // NEW: Tier + Targeting + Publish state
   // ----------------------------
   tier           String         @default("BASIC") // BASIC | PRO | ... (string for v1)
-  platformTarget: platformTarget as any,
+  platformTarget PlatformTarget @default(WEB)
 
   publishStatus   PublishStatus?
   publishedAt     DateTime?
