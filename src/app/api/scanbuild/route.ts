@@ -9,6 +9,10 @@ import { generateCertId } from "@/lib/cert/generateCertId";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 
+import JSZip from "jszip";
+import fs from "node:fs/promises";
+import path from "node:path";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -65,7 +69,9 @@ function detectStructure(scan: ScanLike) {
     };
   }
 
-  const fileNames: string[] = Array.isArray(scan?.files) ? scan.files.map((f: any) => String(f?.name || "")) : [];
+  const fileNames: string[] = Array.isArray(scan?.files)
+    ? scan.files.map((f: any) => String(f?.name || ""))
+    : [];
 
   const hasLoader = fileNames.some((n) => n.toLowerCase().endsWith(".loader.js"));
   const hasFramework = fileNames.some((n) => n.toLowerCase().includes(".framework.js"));
@@ -205,7 +211,9 @@ function decodeBase64ToBuffer(b64: string): Buffer {
 }
 
 // Returns either a scan (from JSON) OR a buffer (from ZIP upload)
-async function parseIncoming(req: NextRequest): Promise<
+async function parseIncoming(
+  req: NextRequest
+): Promise<
   | { mode: "scan"; scan: ScanLike; projectName: string }
   | { mode: "zip"; buffer: Buffer; projectName: string; originalName: string }
 > {
@@ -226,8 +234,7 @@ async function parseIncoming(req: NextRequest): Promise<
     // Accept base64 zip
     const zipBase64 = body?.zipBase64 || body?.zip_b64 || body?.zip;
     if (zipBase64 && typeof zipBase64 === "string") {
-      const originalName =
-        typeof body?.filename === "string" && body.filename.trim() ? body.filename.trim() : "build.zip";
+      const originalName = typeof body?.filename === "string" && body.filename.trim() ? body.filename.trim() : "build.zip";
       const buffer = decodeBase64ToBuffer(zipBase64);
       return { mode: "zip", buffer, projectName, originalName };
     }
@@ -269,6 +276,122 @@ async function parseIncoming(req: NextRequest): Promise<
   );
 }
 
+type InjectResult = {
+  ok: boolean;
+  reason?: string;
+  wroteUniversalInit: boolean;
+  injectedIntoIndexHtml: boolean;
+  indexHtmlPath?: string;
+};
+
+async function loadUniversalInitSource(): Promise<string> {
+  const p = path.join(process.cwd(), "src", "lib", "scripts", "universal-init.js");
+  return fs.readFile(p, "utf8");
+}
+
+/**
+ * Injects universal-init.js into the same directory as index.html,
+ * and injects <script src="universal-init.js"></script> into <head>.
+ *
+ * Works when index.html is at zip root OR inside a single top-level folder (or deeper).
+ * We choose the shortest-path index.html found.
+ */
+async function injectUniversalInitIntoZip(
+  zipBuffer: Buffer,
+  universalInitContent: string
+): Promise<{ patchedZip: Buffer; inject: InjectResult }> {
+  const zip = await JSZip.loadAsync(zipBuffer);
+
+  const allFiles = Object.keys(zip.files).filter((p) => !zip.files[p].dir);
+  const indexCandidates = allFiles.filter((p) => p.toLowerCase().endsWith("index.html"));
+
+  if (indexCandidates.length === 0) {
+    return {
+      patchedZip: zipBuffer,
+      inject: {
+        ok: false,
+        reason: "index.html not found in ZIP",
+        wroteUniversalInit: false,
+        injectedIntoIndexHtml: false,
+      },
+    };
+  }
+
+  // Prefer root-most index.html (shortest path)
+  indexCandidates.sort((a, b) => a.split("/").length - b.split("/").length);
+  const indexHtmlPath = indexCandidates[0];
+
+  const indexFile = zip.file(indexHtmlPath);
+  if (!indexFile) {
+    return {
+      patchedZip: zipBuffer,
+      inject: {
+        ok: false,
+        reason: "index.html entry missing",
+        wroteUniversalInit: false,
+        injectedIntoIndexHtml: false,
+      },
+    };
+  }
+
+  let indexHtml = await indexFile.async("string");
+
+  const alreadyInjected =
+    /<script[^>]+src=["']universal-init\.js["'][^>]*>\s*<\/script>/i.test(indexHtml);
+
+  const dir = indexHtmlPath.includes("/")
+    ? indexHtmlPath.slice(0, indexHtmlPath.lastIndexOf("/") + 1)
+    : "";
+
+  // Always write/overwrite universal-init.js next to index.html
+  zip.file(`${dir}universal-init.js`, universalInitContent);
+
+  let injectedIntoIndexHtml = false;
+
+  if (!alreadyInjected) {
+    const scriptTag = `<script src="universal-init.js"></script>\n`;
+
+    // Best: immediately after <head ...>
+    const headOpen = indexHtml.match(/<head[^>]*>/i);
+    if (headOpen && headOpen.index !== undefined) {
+      const insertAt = headOpen.index + headOpen[0].length;
+      indexHtml = indexHtml.slice(0, insertAt) + "\n" + scriptTag + indexHtml.slice(insertAt);
+      injectedIntoIndexHtml = true;
+    } else {
+      // Fallback: before first <script>
+      const firstScriptIdx = indexHtml.search(/<script/i);
+      if (firstScriptIdx >= 0) {
+        indexHtml = indexHtml.slice(0, firstScriptIdx) + scriptTag + indexHtml.slice(firstScriptIdx);
+        injectedIntoIndexHtml = true;
+      } else {
+        // Last resort: prepend
+        indexHtml = scriptTag + indexHtml;
+        injectedIntoIndexHtml = true;
+      }
+    }
+
+    zip.file(indexHtmlPath, indexHtml);
+  } else {
+    injectedIntoIndexHtml = true;
+  }
+
+  const patchedZip = await zip.generateAsync({
+    type: "nodebuffer",
+    compression: "DEFLATE",
+    compressionOptions: { level: 9 },
+  });
+
+  return {
+    patchedZip,
+    inject: {
+      ok: true,
+      wroteUniversalInit: true,
+      injectedIntoIndexHtml,
+      indexHtmlPath,
+    },
+  };
+}
+
 export async function POST(req: NextRequest) {
   try {
     // ---------- AUTH ----------
@@ -286,17 +409,43 @@ export async function POST(req: NextRequest) {
 
     // ---------- INPUT ----------
     const incoming = await parseIncoming(req);
-
     const projectName = incoming.projectName;
+
+    // ---------- UNIVERSAL INIT INJECTION (ZIP uploads only) ----------
+    let inject: InjectResult = {
+      ok: false,
+      reason: "No ZIP provided (scan-only mode)",
+      wroteUniversalInit: false,
+      injectedIntoIndexHtml: false,
+    };
+
+    let bufferForScan: Buffer | null = null;
+
+    if (incoming.mode === "zip") {
+      const uniinit = await loadUniversalInitSource();
+      const patched = await injectUniversalInitIntoZip(incoming.buffer, uniinit);
+      bufferForScan = patched.patchedZip;
+      inject = patched.inject;
+    }
 
     // ---------- SCAN ----------
     const scan =
       incoming.mode === "scan"
         ? incoming.scan
-        : await scanWebglBuildZip(incoming.buffer);
+        : await scanWebglBuildZip(bufferForScan as Buffer);
+
+    // Attach injection telemetry into scanResult so reports can reference it
+    // (non-breaking: stored as extra field)
+    const scanWithInject = {
+      ...scan,
+      universal_init: {
+        v: 1,
+        ...inject,
+      },
+    };
 
     // ---------- HOST SCORING ----------
-    const hostScoring = scoreHosts(scan);
+    const hostScoring = scoreHosts(scanWithInject);
     const recommendedHost = hostScoring.recommended.slug;
 
     // ---------- FIND / CREATE PROJECT ----------
@@ -321,9 +470,9 @@ export async function POST(req: NextRequest) {
     // ---------- CERT ID ----------
     const certId = await generateCertId();
 
-    const quickScore = Number.isFinite(scan?.quick_score) ? Number(scan.quick_score) : 0;
-    const brotliPresent = !!scan?.compression?.brotli_present;
-    const gzipPresent = !!scan?.compression?.gzip_present;
+    const quickScore = Number.isFinite(scanWithInject?.quick_score) ? Number(scanWithInject.quick_score) : 0;
+    const brotliPresent = !!scanWithInject?.compression?.brotli_present;
+    const gzipPresent = !!scanWithInject?.compression?.gzip_present;
 
     // ---------- CREATE BUILD ----------
     const build = await prisma.build.create({
@@ -332,7 +481,7 @@ export async function POST(req: NextRequest) {
         projectId: project.id,
 
         status: "scanned",
-        scanResult: scan as any,
+        scanResult: scanWithInject as any,
         scannedAt: new Date(),
 
         quickScore,
@@ -388,11 +537,17 @@ export async function POST(req: NextRequest) {
       buildId: build.id,
       certId: build.certId,
       reportUrl: `/report/${build.certId}`,
-      scan,
 
+      // return scanWithInject (keeps your existing contract plus the new telemetry)
+      scan: scanWithInject,
+
+      // quick fields for UI
       quickScore: build.quickScore,
       recommendedHost,
       hostCompatibilityScore: hostScoring.recommended.score,
+
+      // direct injection telemetry for quick verification
+      inject,
     });
   } catch (err: any) {
     const msg = err?.message || "Scan failed";

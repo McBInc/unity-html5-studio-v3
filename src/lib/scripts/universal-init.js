@@ -642,7 +642,7 @@
   // Expose immediately (even before init completes)
   window.HTML5STUDIO = api;
 
-  // ---- Kick off -------------------------------------------------------------
+  
   // Start ASAP but after DOM is minimally available
   // (we don't need DOMContentLoaded to init SDKs)
   initAll();
