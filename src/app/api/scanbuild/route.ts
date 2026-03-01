@@ -409,6 +409,26 @@ export async function POST(req: NextRequest) {
 
     // ---------- INPUT ----------
     const incoming = await parseIncoming(req);
+    // Optional: allow clients to suggest a target (doesn't break existing)
+const platformTargetRaw =
+  incoming.mode === "scan"
+    ? (incoming.scan?.platformTarget || (incoming as any)?.platformTarget)
+    : null;
+
+const platformTarget = (() => {
+  const raw = String(platformTargetRaw ?? "WEB").toUpperCase();
+  const allowed = new Set([
+    "WEB",
+    "MOBILE_WEB",
+    "TELEGRAM",
+    "META",
+    "DISCORD",
+    "TIKTOK",
+    "YOUTUBE_PLAYABLES",
+    "LINKEDIN_GAMES",
+  ]);
+  return allowed.has(raw) ? raw : "WEB";
+})();
     const projectName = incoming.projectName;
 
     // ---------- UNIVERSAL INIT INJECTION (ZIP uploads only) ----------

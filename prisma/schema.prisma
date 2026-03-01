@@ -1,10 +1,9 @@
 // prisma/schema.prisma
 //
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-//
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Prisma schema for HTML5STUDIO
+// - Scan-only phase stores diagnostic scan results (no binaries required)
+// - Publish phase produces a certified LIVE URL (no ZIP returned)
+// - PublishJob provides audit trail + evidence (hashes, injection telemetry, platform targeting)
 
 generator client {
   provider = "prisma-client-js"
@@ -15,6 +14,36 @@ datasource db {
   provider = "postgresql"
 }
 
+//
+// ENUMS
+//
+enum PlatformTarget {
+  WEB
+  MOBILE_WEB
+  TELEGRAM
+  META
+  DISCORD
+  TIKTOK
+  YOUTUBE_PLAYABLES
+  LINKEDIN_GAMES
+}
+
+enum PublishMode {
+  WE_PUBLISH
+  ASSISTED
+}
+
+enum PublishStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+//
+// CORE MODELS
+//
 model User {
   id            String    @id @default(cuid())
   name          String?
@@ -25,9 +54,8 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  fixPackUses Int @default(0)
-  subscriptionActive Boolean @default(false)
-
+  fixPackUses         Int     @default(0)
+  subscriptionActive  Boolean @default(false)
 
   entitlements Entitlement[]
   projects     Project[]
@@ -80,16 +108,15 @@ model Project {
 model Build {
   id String @id @default(cuid())
 
-
   userId String
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   projectId String
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   buildNumber  Int?
   versionLabel String?
-  status       String  @default("scanned")
+  status       String @default("scanned")
 
   // Hybrid scan persistence
   scanResult    Json?
@@ -99,16 +126,26 @@ model Build {
   gzipPresent   Boolean?
 
   // ----------------------------
-  // WebGLive Certification Report (public-but-unlisted)
+  // Certification / Report
   // ----------------------------
-  certId        String?  @unique
-  reportStatus  String   @default("draft") // draft | paid | deployed | revealed
+  certId        String? @unique
+  reportStatus  String  @default("draft") // draft | paid | deployed | revealed
   allocationAt  DateTime?
   liveUrl       String?
   clipUrl       String?
   certifiedAt   DateTime?
 
-  // For later (R2/S3)
+  // ----------------------------
+  // NEW: Tier + Targeting + Publish state
+  // ----------------------------
+  tier           String         @default("BASIC") // BASIC | PRO | ... (string for v1)
+  platformTarget: platformTarget as any,
+
+  publishStatus   PublishStatus?
+  publishedAt     DateTime?
+  publishEvidence Json?
+
+  // For later object storage (R2/S3)
   uploadStorageKey String?
 
   createdAt DateTime @default(now())
@@ -116,9 +153,44 @@ model Build {
 
   launchProfile LaunchProfile?
   fixPacks      FixPack[]
+  publishJobs   PublishJob[]
 
   @@index([userId])
   @@index([projectId])
+  @@index([platformTarget])
+  @@index([publishStatus])
+}
+
+model PublishJob {
+  id String @id @default(cuid())
+
+  buildId String
+  build   Build  @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  // Target + mode
+  platformTarget PlatformTarget
+  mode           PublishMode @default(ASSISTED)
+
+  // Where it ended up (or will end up)
+  liveUrl      String?
+  provider     String? // "netlify" | "vercel" | "r2" | "client_dashboard" | ...
+  providerMeta Json?   // ids, site name, env, etc.
+
+  // Lifecycle
+  status     PublishStatus @default(QUEUED)
+  startedAt  DateTime?
+  finishedAt DateTime?
+  error      String?
+
+  // Evidence: hashes, injection telemetry, rulepack versions, screenshots links, etc.
+  evidence Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([buildId])
+  @@index([status])
+  @@index([platformTarget])
 }
 
 model CertSequence {
@@ -133,30 +205,22 @@ model LaunchProfile {
   buildId String @unique
   build   Build  @relation(fields: [buildId], references: [id], onDelete: Cascade)
 
-  // ----------------------------
   // Existing fields (KEEP)
-  // ----------------------------
   hostProvider        String @default("unknown")
   destinationPlatform String @default("unknown")
   goal                String @default("test")
   monetization        String @default("unknown")
 
-  // ----------------------------
-  // NEW: Intelligence targeting
-  // ----------------------------
+  // Intelligence targeting
   targetPlatformId String?
   targetPlatform   Platform? @relation(fields: [targetPlatformId], references: [id])
 
   targetHostId String?
-  targetHost   Host?   @relation(fields: [targetHostId], references: [id])
+  targetHost   Host? @relation(fields: [targetHostId], references: [id])
 
-  // Optional extra intent fields (separate from existing strings)
   monetizationIntent   String?
   distributionStrategy String?
 
-  // ----------------------------
-  // NEW: Scoring + explanation
-  // ----------------------------
   readinessScore         Int?
   platformFitScore       Int?
   hostCompatibilityScore Int?
@@ -183,16 +247,14 @@ model FixPack {
   createdAt DateTime @default(now())
 }
 
-// ----------------------------
-// NEW INTELLIGENCE TABLES
-// ----------------------------
-
+//
+// INTELLIGENCE TABLES
+//
 model Platform {
   id   String @id @default(cuid())
   name String
   slug String @unique
 
-  // Rules / limits
   initialDownloadMaxMB Int?
   totalBuildMaxMB      Int?
   maxFileCount         Int?
@@ -200,7 +262,7 @@ model Platform {
 
   requiresCompressedBuild Boolean @default(false)
 
-  // Stored as JSON string for simplicity v1 (e.g. '["brotli","gzip"]')
+  // JSON string (e.g. '["brotli","gzip"]')
   acceptedCompression String
 
   requiresSdkInjection Boolean @default(false)
@@ -233,10 +295,9 @@ model Host {
   launchProfiles LaunchProfile[]
 }
 
-// ----------------------------
-// NEXTAUTH MODELS (required for Email + OAuth)
-// ----------------------------
-
+//
+// NEXTAUTH MODELS
+//
 model Account {
   id                String  @id @default(cuid())
   userId            String
@@ -276,7 +337,6 @@ model VerificationToken {
   @@unique([identifier, token])
 }
 
-// Optional, only used for WebAuthn; safe to include.
 model Authenticator {
   credentialID         String  @unique
   userId               String
