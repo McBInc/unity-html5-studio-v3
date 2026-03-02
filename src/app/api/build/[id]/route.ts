@@ -1,91 +1,51 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+// src/app/api/build/[id]/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/db";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-export async function GET(
-  req: Request,
-  ctx: { params: Promise<{ id: string }> }
-) {
+export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
   try {
-    const { id: rawId } = await ctx.params;
-    const id = (rawId || "").trim();
+    const id = ctx.params?.id;
 
-    const url = new URL(req.url);
-    const emailRaw = (url.searchParams.get("email") || "").trim();
-    const email = emailRaw.toLowerCase();
-
-    if (!id) {
+    if (!id || typeof id !== "string") {
       return NextResponse.json(
-        { success: false, error: "Missing build id" },
+        { ok: false, error: "Missing build id in route param" },
         { status: 400 }
       );
     }
 
-    if (!email || !email.includes("@")) {
-      return NextResponse.json(
-        { success: false, error: "Missing or invalid email" },
-        { status: 400 }
-      );
-    }
-
-    // 1) Resolve user by email (soft auth)
-    const user = await prisma.user.findUnique({
-      where: { email },
-      select: { id: true, email: true },
-    });
-
-    if (!user) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "No user found for this email",
-          debug: { email },
-        },
-        { status: 404 }
-      );
-    }
-
-    // 2) Fetch build by id + userId (more reliable than nested email filter)
-    const build = await prisma.build.findFirst({
-      where: {
-        id,
-        userId: user.id,
-      },
-      include: {
-        project: { select: { id: true, name: true } },
-        launchProfile: true,
-        fixPacks: {
-          select: {
-            id: true,
-            createdAt: true,
-            hostProvider: true,
-            destinationPlatform: true,
-            version: true,
-          },
-        },
-      },
+    const build = await prisma.build.findUnique({
+      where: { id },
+      include: { project: true, launchProfile: true },
     });
 
     if (!build) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Build not found for this email",
-          debug: { buildId: id, email, userId: user.id },
-        },
-        { status: 404 }
-      );
+      return NextResponse.json({ ok: false, error: "Build not found" }, { status: 404 });
     }
 
     return NextResponse.json({
-      success: true,
-      build,
+      ok: true,
+      build: {
+        id: build.id,
+        certId: build.certId,
+        reportStatus: build.reportStatus,
+        scannedAt: build.scannedAt,
+        quickScore: build.quickScore,
+        brotliPresent: build.brotliPresent,
+        gzipPresent: build.gzipPresent,
+        liveUrl: build.liveUrl,
+        scanResult: build.scanResult,
+        project: build.project ? { id: build.project.id, name: build.project.name } : null,
+        launchProfile: build.launchProfile ?? null,
+        createdAt: build.createdAt,
+        updatedAt: build.updatedAt,
+      },
     });
   } catch (err: any) {
-    console.error("[api/build/[id]] failed:", err);
     return NextResponse.json(
-      { success: false, error: err?.message || "Failed to load build" },
+      { ok: false, error: err?.message || "Failed to load build" },
       { status: 500 }
     );
   }
