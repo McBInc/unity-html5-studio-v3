@@ -49,7 +49,9 @@ function injectScriptTag(html: string, src: string): { html: string; injected: b
 export async function injectUniversalInitIntoZip(
   zipBuffer: Buffer,
   universalInitJs: string
-): Promise<{ patchedZip: Buffer; result: UniversalInitPatchReport }> {
+): Promise<{
+    outZip: Buffer<ArrayBufferLike>; patchedZip: Buffer; result: UniversalInitPatchReport 
+}> {
   const result: UniversalInitPatchReport = {
     v: 1,
     ok: false,
@@ -62,14 +64,18 @@ export async function injectUniversalInitIntoZip(
 
   const indexPath = pickBestIndexHtml(allPaths);
   if (!indexPath) {
-    result.reason = "No index.html found anywhere in ZIP";
-    return { patchedZip: zipBuffer, result };
-  }
+  result.reason = "No index.html found anywhere in ZIP";
+  return {
+    outZip: zipBuffer,
+    patchedZip: zipBuffer,
+    result,
+  };
+}
 
   const indexFile = zip.file(indexPath);
   if (!indexFile) {
     result.reason = "index.html entry not readable";
-    return { patchedZip: zipBuffer, result };
+    return { outZip: zipBuffer, patchedZip: zipBuffer, result };
   }
 
   // Determine where to write universal-init.js (same folder as index.html)
@@ -91,5 +97,5 @@ export async function injectUniversalInitIntoZip(
   result.ok = true;
 
   const out = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
-  return { patchedZip: out, result };
+  return { outZip: out, patchedZip: out, result };
 }
