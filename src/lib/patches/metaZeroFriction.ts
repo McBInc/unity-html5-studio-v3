@@ -1,100 +1,92 @@
 // src/lib/patches/metaZeroFriction.ts
 import JSZip from "jszip";
+import path from "node:path";
 
-export type PatchTier = "BASIC" | "PRO" | "ENTERPRISE";
-export type PatchResult = {
+type PatchResult = {
+  v: 1;
   ok: boolean;
   reason?: string;
-  indexHtmlPath?: string;
   injectedOverlay: boolean;
   overlayPath?: string;
+  indexHtmlPath?: string;
 };
 
-function findBestIndexHtmlPath(zip: JSZip): string | null {
-  const allFiles = Object.keys(zip.files).filter((p) => !zip.files[p].dir);
-  const candidates = allFiles.filter((p) => p.toLowerCase().endsWith("index.html"));
-  if (!candidates.length) return null;
-  candidates.sort((a, b) => a.split("/").length - b.split("/").length);
-  return candidates[0];
+function pickBestIndexHtml(paths: string[]): string | null {
+  const candidates = paths
+    .filter((p) => p.toLowerCase().endsWith("/index.html") || p.toLowerCase() === "index.html")
+    // prefer shallower paths (WebGL/index.html is ok; super deep ones less likely)
+    .sort((a, b) => a.split("/").length - b.split("/").length);
+
+  return candidates[0] ?? null;
 }
 
-function scriptAlreadyPresent(html: string, fileName: string) {
-  const re = new RegExp(`<script[^>]+src=["']${fileName.replace(".", "\\.")}["'][^>]*>\\s*</script>`, "i");
-  return re.test(html);
-}
+function injectScriptIntoHtml(html: string, scriptSrc: string): { html: string; injected: boolean } {
+  const tag = `<script src="${scriptSrc}"></script>`;
 
-function injectIntoHead(html: string, scriptTag: string) {
-  const headOpen = html.match(/<head[^>]*>/i);
-  if (headOpen && headOpen.index !== undefined) {
-    const insertAt = headOpen.index + headOpen[0].length;
-    return html.slice(0, insertAt) + "\n" + scriptTag + "\n" + html.slice(insertAt);
+  // already present?
+  if (html.includes(tag) || html.includes(scriptSrc)) return { html, injected: false };
+
+  const lower = html.toLowerCase();
+  const bodyCloseIdx = lower.lastIndexOf("</body>");
+  if (bodyCloseIdx >= 0) {
+    const out = html.slice(0, bodyCloseIdx) + `\n  ${tag}\n` + html.slice(bodyCloseIdx);
+    return { html: out, injected: true };
   }
-  const firstScriptIdx = html.search(/<script/i);
-  if (firstScriptIdx >= 0) {
-    return html.slice(0, firstScriptIdx) + scriptTag + "\n" + html.slice(firstScriptIdx);
-  }
-  return scriptTag + "\n" + html;
+
+  // fallback: append at end
+  return { html: html + `\n${tag}\n`, injected: true };
 }
 
 /**
- * BASIC tier: inject diagnostic-overlay.js next to index.html and add <script> tag into <head>.
+ * Applies the diagnostic HUD overlay (BASIC tier) into the same folder as the chosen index.html.
+ * - Writes diagnostic-overlay.js next to index.html
+ * - Injects <script src="diagnostic-overlay.js"></script> into that index.html
  */
 export async function applyDiagnosticOverlayPatch(
   zipBuffer: Buffer,
-  overlayJsContent: string,
-  tier: PatchTier
+  overlayJs: string,
+  tier: string
 ): Promise<{ patchedZip: Buffer; patch: PatchResult }> {
-  // Only BASIC (per your intelligence row); you can expand later.
-  if (tier !== "BASIC") {
-    return {
-      patchedZip: zipBuffer,
-      patch: { ok: true, injectedOverlay: false, reason: `Tier ${tier} has no Diagnostic HUD patch` },
-    };
+  const patch: PatchResult = { v: 1, ok: false, injectedOverlay: false };
+
+  if (String(tier || "").toUpperCase() !== "BASIC") {
+    patch.ok = true;
+    patch.reason = "Not BASIC tier";
+    return { patchedZip: zipBuffer, patch };
   }
 
   const zip = await JSZip.loadAsync(zipBuffer);
-  const indexHtmlPath = findBestIndexHtmlPath(zip);
 
-  if (!indexHtmlPath) {
-    return {
-      patchedZip: zipBuffer,
-      patch: { ok: false, reason: "index.html not found", injectedOverlay: false },
-    };
+  const allPaths = Object.keys(zip.files);
+  const indexPath = pickBestIndexHtml(allPaths);
+
+  if (!indexPath) {
+    patch.reason = "No index.html found anywhere in ZIP";
+    return { patchedZip: zipBuffer, patch };
   }
 
-  const indexFile = zip.file(indexHtmlPath);
+  const indexFile = zip.file(indexPath);
   if (!indexFile) {
-    return {
-      patchedZip: zipBuffer,
-      patch: { ok: false, reason: "index.html entry missing", injectedOverlay: false },
-    };
+    patch.reason = "index.html entry not readable";
+    return { patchedZip: zipBuffer, patch };
   }
 
-  let html = await indexFile.async("string");
+  const indexDir = path.posix.dirname(indexPath);
+  const overlayPath = indexDir === "." ? "diagnostic-overlay.js" : `${indexDir}/diagnostic-overlay.js`;
 
-  const dir = indexHtmlPath.includes("/") ? indexHtmlPath.slice(0, indexHtmlPath.lastIndexOf("/") + 1) : "";
-  const overlayFileName = "diagnostic-overlay.js";
-  const overlayPath = `${dir}${overlayFileName}`;
+  // Write overlay file next to index.html
+  zip.file(overlayPath, overlayJs);
 
-  // Write overlay script next to index.html
-  zip.file(overlayPath, overlayJsContent);
+  // Inject script tag into index.html
+  const indexHtml = await indexFile.async("string");
+  const injected = injectScriptIntoHtml(indexHtml, "diagnostic-overlay.js");
+  zip.file(indexPath, injected.html);
 
-  // Inject script tag (ensure it runs early; after universal-init is OK too)
-  const already = scriptAlreadyPresent(html, overlayFileName);
-  if (!already) {
-    const tag = `<script src="${overlayFileName}"></script>`;
-    html = injectIntoHead(html, tag);
-    zip.file(indexHtmlPath, html);
-  }
+  patch.ok = true;
+  patch.injectedOverlay = injected.injected;
+  patch.overlayPath = overlayPath;
+  patch.indexHtmlPath = indexPath;
 
-  const patchedZip = await zip.generateAsync({
-    type: "nodebuffer",
-    compression: "DEFLATE",
-    compressionOptions: { level: 9 },
-  });
-
-  return {
-    patchedZip,
-    patch: { ok: true, indexHtmlPath, injectedOverlay: true, overlayPath },
-  };
+  const out = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+  return { patchedZip: out, patch };
 }

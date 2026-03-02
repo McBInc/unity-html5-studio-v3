@@ -21,3 +21,5 @@ echo "*.zip" >> .gitignore
 # local notes
 html5studio-*.txt
 dependency-map.txt
+src/lib/scripts/patch-zip-local.*
+.env*.local

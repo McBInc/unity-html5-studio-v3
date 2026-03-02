@@ -2,17 +2,16 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import crypto from "node:crypto";
 
-// Your existing injector
+import JSZip from "jszip";
+
 import { injectUniversalInitIntoZip } from "@/lib/patchers/injectUniversalInit";
-
-// Your HUD overlay patcher (BASIC tier)
 import { applyDiagnosticOverlayPatch } from "@/lib/patches/metaZeroFriction";
 
 export const runtime = "nodejs";
@@ -30,8 +29,18 @@ type PlatformTarget =
 
 type PublishMode = "WE_PUBLISH" | "ASSISTED";
 
-function normTarget(v: any): PlatformTarget {
-  const raw = String(v ?? "WEB").toUpperCase();
+type Action = "request" | "confirm";
+
+function json(ok: boolean, body: any, status = 200) {
+  return NextResponse.json({ ok, ...body }, { status });
+}
+
+function upper(s: any) {
+  return String(s ?? "").trim().toUpperCase();
+}
+
+function parsePlatformTarget(raw: any): PlatformTarget {
+  const v = upper(raw || "WEB");
   const allowed = new Set<PlatformTarget>([
     "WEB",
     "MOBILE_WEB",
@@ -42,349 +51,335 @@ function normTarget(v: any): PlatformTarget {
     "YOUTUBE_PLAYABLES",
     "LINKEDIN_GAMES",
   ]);
-  return allowed.has(raw as PlatformTarget) ? (raw as PlatformTarget) : "WEB";
+  return allowed.has(v as PlatformTarget) ? (v as PlatformTarget) : "WEB";
 }
 
-function normMode(v: any): PublishMode {
-  const raw = String(v ?? "ASSISTED").toUpperCase();
-  return raw === "WE_PUBLISH" ? "WE_PUBLISH" : "ASSISTED";
+function parseMode(raw: any): PublishMode {
+  const v = upper(raw || "ASSISTED");
+  return v === "WE_PUBLISH" ? "WE_PUBLISH" : "ASSISTED";
 }
 
-function sha256(buf: Buffer) {
-  return crypto.createHash("sha256").update(buf).digest("hex");
+function isValidHttpUrl(u: string) {
+  try {
+    const url = new URL(u);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
-async function loadRepoScript(relPathFromRepoRoot: string): Promise<string> {
-  const p = path.join(process.cwd(), relPathFromRepoRoot);
-  return fs.readFile(p, "utf8");
-}
+/**
+ * Many Unity zips have a top folder like "WebGL/".
+ * We deploy with "WebGL/" content at root so Netlify serves /index.html properly.
+ *
+ * If NETLIFY_BASE_DIR is set (default "WebGL"), and that folder exists in the ZIP,
+ * this function returns a new ZIP containing ONLY that folder's contents moved to root.
+ * Otherwise returns original ZIP buffer.
+ */
+async function normalizeUnityZipForHosting(zipBuffer: Buffer): Promise<{
+  outZip: Buffer;
+  usedBaseDir: string | null;
+  reason?: string;
+}> {
+  const baseDir = (process.env.NETLIFY_BASE_DIR || "WebGL").replace(/^[./]+/, "").replace(/\/+$/, "");
+  const zip = await JSZip.loadAsync(zipBuffer);
 
-async function parsePublishRequest(req: NextRequest): Promise<
-  | {
-      kind: "json";
-      action: "request" | "confirm" | "fail";
-      certId: string;
-      platformTarget: PlatformTarget;
-      mode: PublishMode;
-      liveUrl?: string;
-      provider?: string;
-      providerMeta?: any;
-      error?: string;
-    }
-  | {
-      kind: "multipart";
-      action: "request";
-      certId: string;
-      platformTarget: PlatformTarget;
-      mode: PublishMode;
-      provider?: string;
-      providerMeta?: any;
-      file: File;
-    }
-> {
-  const ct = (req.headers.get("content-type") || "").toLowerCase();
+  const files = Object.keys(zip.files);
 
-  if (ct.includes("application/json")) {
-    const body = await req.json().catch(() => null);
-    const action = String(body?.action ?? "request") as any;
+  const prefix = `${baseDir}/`;
+  const hasBaseDir = files.some((p) => p.startsWith(prefix));
 
-    const certId = String(body?.certId ?? "").trim();
-    if (!certId) throw new Error("Missing certId");
-
-    return {
-      kind: "json",
-      action: action === "confirm" || action === "fail" ? action : "request",
-      certId,
-      platformTarget: normTarget(body?.platformTarget),
-      mode: normMode(body?.mode),
-      liveUrl: typeof body?.liveUrl === "string" ? body.liveUrl.trim() : undefined,
-      provider: typeof body?.provider === "string" ? body.provider.trim() : undefined,
-      providerMeta: body?.providerMeta ?? undefined,
-      error: typeof body?.error === "string" ? body.error : undefined,
-    };
+  // If no base folder, assume already rooted correctly
+  if (!hasBaseDir) {
+    return { outZip: zipBuffer, usedBaseDir: null, reason: `No "${baseDir}/" folder found; deploying ZIP as-is.` };
   }
 
-  if (ct.includes("multipart/form-data")) {
-    const form = await req.formData();
+  // Build a new zip with baseDir/* moved to root
+  const out = new JSZip();
 
-    const certId = String(form.get("certId") ?? "").trim();
-    if (!certId) throw new Error("Missing certId");
+  for (const p of files) {
+    const entry = zip.files[p];
+    if (entry.dir) continue;
+    if (!p.startsWith(prefix)) continue;
 
-    const file = form.get("file");
-    if (!(file instanceof File)) throw new Error("Missing file (ZIP) in form-data");
+    const rel = p.slice(prefix.length);
+    if (!rel) continue;
 
-    const provider = typeof form.get("provider") === "string" ? String(form.get("provider")).trim() : undefined;
-    const providerMetaRaw = typeof form.get("providerMeta") === "string" ? String(form.get("providerMeta")).trim() : "";
-    let providerMeta: any = undefined;
-    if (providerMetaRaw) {
-      try { providerMeta = JSON.parse(providerMetaRaw); } catch { providerMeta = providerMetaRaw; }
-    }
-
-    return {
-      kind: "multipart",
-      action: "request",
-      certId,
-      platformTarget: normTarget(form.get("platformTarget")),
-      mode: normMode(form.get("mode")),
-      provider,
-      providerMeta,
-      file,
-    };
+    const data = await zip.file(p)!.async("nodebuffer");
+    out.file(rel, data);
   }
 
-  throw new Error(`Unsupported Content-Type for /api/publish: ${ct || "missing"}`);
+  const outZip = await out.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+
+  return { outZip, usedBaseDir: baseDir };
+}
+
+/**
+ * Deploy a ZIP directly to a Netlify site.
+ * Returns the published URL if available.
+ */
+async function deployZipToNetlify(zipBuffer: Buffer): Promise<{
+  deployId: string | null;
+  url: string | null;
+  deployUrl: string | null;
+  logs: any;
+}> {
+  const token = process.env.NETLIFY_TOKEN;
+  const siteId = process.env.NETLIFY_SITE_ID;
+
+  if (!token || !siteId) {
+    throw new Error("Missing NETLIFY_TOKEN or NETLIFY_SITE_ID in environment.");
+  }
+
+  const res = await fetch(`https://api.netlify.com/api/v1/sites/${siteId}/deploys`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/zip",
+    },
+    body: new Uint8Array(zipBuffer),
+  });
+
+  const text = await res.text();
+  let data: any = null;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // leave as raw
+  }
+
+  if (!res.ok) {
+    throw new Error(`Netlify deploy failed (${res.status}): ${typeof data === "object" ? JSON.stringify(data) : text}`);
+  }
+
+  // Netlify commonly returns: id, url, deploy_ssl_url, deploy_url
+  const deployId = data?.id ? String(data.id) : null;
+  const url = data?.deploy_ssl_url ? String(data.deploy_ssl_url) : data?.url ? String(data.url) : null;
+  const deployUrl = data?.deploy_url ? String(data.deploy_url) : null;
+
+  return { deployId, url, deployUrl, logs: data };
+}
+
+async function readRepoScript(relPathFromRepoRoot: string) {
+  const full = path.join(process.cwd(), relPathFromRepoRoot);
+  return fs.readFile(full, "utf8");
 }
 
 export async function POST(req: NextRequest) {
   try {
-    // AUTH
+    // ---------- AUTH ----------
     const session = await getServerSession(authOptions);
-    if (!session?.user?.email) {
-      return NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 });
-    }
+    if (!session?.user?.email) return json(false, { error: "Not authenticated" }, 401);
 
-    const email = session.user.email;
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) {
-      return NextResponse.json({ ok: false, error: "User not found" }, { status: 404 });
-    }
+    const user = await prisma.user.findUnique({ where: { email: session.user.email } });
+    if (!user) return json(false, { error: "User not found" }, 404);
 
-    const incoming = await parsePublishRequest(req);
+    const ct = (req.headers.get("content-type") || "").toLowerCase();
 
-    // Resolve Build by certId (belongs to user)
-    const build = await prisma.build.findFirst({
-      where: {
-        certId: incoming.certId,
-        userId: user.id,
-      },
-      include: {
-        project: true,
-      },
-    });
+    // ---------- JSON MODE (ASSISTED) ----------
+    // Body: { action: "request"|"confirm", certId, platformTarget, mode:"ASSISTED", liveUrl? }
+    if (ct.includes("application/json")) {
+      const body = await req.json().catch(() => null);
 
-    if (!build) {
-      return NextResponse.json({ ok: false, error: "Build not found for certId" }, { status: 404 });
-    }
+      const action = (String(body?.action || "request") as Action) || "request";
+      const certId = String(body?.certId || "").trim();
+      const platformTarget = parsePlatformTarget(body?.platformTarget);
+      const mode = parseMode(body?.mode || "ASSISTED"); // JSON is primarily for ASSISTED
 
-    // Always persist targeting choice on the Build for reporting
-    const platformTarget = incoming.platformTarget;
-    const mode = incoming.mode;
+      if (!certId) return json(false, { error: "Missing certId" }, 400);
 
-    // Create a new PublishJob for audit trail
-    const publishJob = await prisma.publishJob.create({
-      data: {
-        buildId: build.id,
-        platformTarget,
-        mode,
-        provider: (incoming as any).provider ?? null,
-        providerMeta: (incoming as any).providerMeta ?? null,
-        status: "QUEUED",
-      } as any,
-    });
+      const build = await prisma.build.findUnique({ where: { certId } });
+      if (!build || build.userId !== user.id) return json(false, { error: "Build not found" }, 404);
 
-    // Action handling for JSON confirm/fail
-    if (incoming.kind === "json") {
-      if (incoming.action === "confirm") {
-        if (!incoming.liveUrl) {
-          return NextResponse.json({ ok: false, error: "Missing liveUrl for confirm action" }, { status: 400 });
-        }
-
-        // Mark job succeeded + attach liveUrl
-        const updatedJob = await prisma.publishJob.update({
-          where: { id: publishJob.id },
-          data: {
-            status: "SUCCEEDED",
-            startedAt: new Date(),
-            finishedAt: new Date(),
-            liveUrl: incoming.liveUrl,
-            provider: incoming.provider ?? null,
-            providerMeta: incoming.providerMeta ?? null,
-          } as any,
-        });
-
-        // Update Build liveUrl and publish state
-        await prisma.build.update({
-          where: { id: build.id },
-          data: {
-            platformTarget,
-            publishStatus: "SUCCEEDED",
-            publishedAt: new Date(),
-            liveUrl: incoming.liveUrl,
-          } as any,
-        });
-
-        return NextResponse.json({
-          ok: true,
-          action: "confirm",
-          certId: build.certId,
-          publishJobId: updatedJob.id,
-          liveUrl: incoming.liveUrl,
-          reportUrl: `/report/${build.certId}`,
-        });
-      }
-
-      if (incoming.action === "fail") {
-        const updatedJob = await prisma.publishJob.update({
-          where: { id: publishJob.id },
-          data: {
-            status: "FAILED",
-            startedAt: new Date(),
-            finishedAt: new Date(),
-            error: incoming.error ?? "Publish failed (no details provided)",
-          } as any,
-        });
-
-        await prisma.build.update({
-          where: { id: build.id },
-          data: {
-            platformTarget,
-            publishStatus: "FAILED",
-          } as any,
-        });
-
-        return NextResponse.json({
-          ok: true,
-          action: "fail",
-          certId: build.certId,
-          publishJobId: updatedJob.id,
-          reportUrl: `/report/${build.certId}`,
-        });
-      }
-
-      // Default JSON action=request → ASSISTED job creation
-      await prisma.publishJob.update({
-        where: { id: publishJob.id },
+      // Create or reuse a PublishJob
+      const job = await prisma.publishJob.create({
         data: {
-          status: "RUNNING",
-          startedAt: new Date(),
-          evidence: {
-            v: 1,
-            note: "ASSISTED publish requested. Provide liveUrl via action=confirm when upload is complete.",
+          buildId: build.id,
+          platformTarget: platformTarget as any,
+          mode: mode as any,
+          status: "QUEUED" as any,
+        },
+      });
+
+      if (action === "request") {
+        // ASSISTED: we don't deploy anything, we just create a job record + tell user to provide liveUrl
+        return json(true, {
+          publishJobId: job.id,
+          certId,
+          platformTarget,
+          mode,
+          next: {
+            action: "confirm",
+            required: ["liveUrl"],
           },
-        } as any,
+          reportUrl: `/report/${certId}`,
+        });
+      }
+
+      // confirm
+      const liveUrl = String(body?.liveUrl || "").trim();
+      if (!liveUrl || !isValidHttpUrl(liveUrl)) return json(false, { error: "Invalid or missing liveUrl" }, 400);
+
+      await prisma.publishJob.update({
+        where: { id: job.id },
+        data: {
+          status: "SUCCEEDED" as any,
+          finishedAt: new Date(),
+          liveUrl,
+          provider: "assisted",
+          evidence: { v: 1, confirmedBy: user.email, liveUrl },
+        },
       });
 
       await prisma.build.update({
         where: { id: build.id },
         data: {
-          platformTarget,
-          publishStatus: "RUNNING",
+          liveUrl,
+          reportStatus: "deployed",
+          publishedAt: new Date(),
+          publishStatus: "SUCCEEDED" as any,
+          publishEvidence: { v: 1, mode: "ASSISTED", platformTarget, liveUrl },
         } as any,
       });
 
-      return NextResponse.json({
-        ok: true,
-        action: "request",
-        mode,
-        certId: build.certId,
-        publishJobId: publishJob.id,
-        next: {
-          hint: "When upload is completed in the target platform, POST /api/publish with { action:'confirm', certId, platformTarget, mode, liveUrl }",
-        },
-        reportUrl: `/report/${build.certId}`,
+      return json(true, {
+        publishJobId: job.id,
+        certId,
+        liveUrl,
+        reportUrl: `/report/${certId}`,
+        status: "SUCCEEDED",
       });
     }
 
-    // Multipart request: WE_PUBLISH flow with ZIP present (but still no ZIP returned)
-    const file = incoming.file;
-    const zipBuffer = Buffer.from(await file.arrayBuffer());
+    // ---------- MULTIPART MODE (WE_PUBLISH) ----------
+    // FormData:
+    // - file: zip
+    // - certId: WGL-CERT-...
+    // - platformTarget: DISCORD|META|...
+    // - mode: WE_PUBLISH
+    // - tier: BASIC (optional; fallback to build.tier if present)
+    if (ct.includes("multipart/form-data")) {
+      const form = await req.formData();
+      const file = form.get("file") as File | null;
 
-    // Mark running
-    await prisma.publishJob.update({
-      where: { id: publishJob.id },
-      data: { status: "RUNNING", startedAt: new Date() } as any,
-    });
+      const certId = String(form.get("certId") || "").trim();
+      const platformTarget = parsePlatformTarget(form.get("platformTarget"));
+      const mode = parseMode(form.get("mode"));
 
-    await prisma.build.update({
-      where: { id: build.id },
-      data: { platformTarget, publishStatus: "RUNNING" } as any,
-    });
+      if (!certId) return json(false, { error: "Missing certId" }, 400);
+      if (!file) return json(false, { error: "Missing ZIP file (form field: file)" }, 400);
+      if (mode !== "WE_PUBLISH") return json(false, { error: "multipart publish requires mode=WE_PUBLISH" }, 400);
 
-    // Load scripts from repo (source of truth)
-    const universalInit = await loadRepoScript("src/lib/scripts/universal-init.js");
+      const build = await prisma.build.findUnique({ where: { certId } });
+      if (!build || build.userId !== user.id) return json(false, { error: "Build not found" }, 404);
 
-    // 1) Inject universal-init.js (always for publish builds)
-    const uni = await injectUniversalInitIntoZip(zipBuffer, universalInit);
+      // Determine tier (prefer DB if present, else provided tier, else BASIC)
+      const tierFromDb = (build as any)?.tier ? String((build as any).tier) : "";
+      const tierFromForm = String(form.get("tier") || "");
+      const tier = (tierFromDb || tierFromForm || "BASIC").toUpperCase();
 
-    // 2) Apply HUD overlay if BASIC tier
-    let patchedZip = uni.patchedZip;
-    let overlayPatch: any = { ok: true, injectedOverlay: false, reason: "Not BASIC tier" };
+      // Create PublishJob
+      const job = await prisma.publishJob.create({
+        data: {
+          buildId: build.id,
+          platformTarget: platformTarget as any,
+          mode: "WE_PUBLISH" as any,
+          status: "RUNNING" as any,
+          startedAt: new Date(),
+        },
+      });
 
-    if ((build.tier || "BASIC").toUpperCase() === "BASIC") {
-      const overlayJs = await loadRepoScript("src/lib/scripts/diagnostic-overlay.js");
-      const overlayRes = await applyDiagnosticOverlayPatch(patchedZip, overlayJs, "BASIC");
-      patchedZip = overlayRes.patchedZip;
-      overlayPatch = overlayRes.patch;
+      // Read zip
+      const originalZipBuffer = Buffer.from(await file.arrayBuffer());
+
+      // Load repo scripts for injection
+      const universalInitJs = await readRepoScript("src/lib/scripts/universal-init.js");
+      const overlayJs = await readRepoScript("src/lib/scripts/diagnostic-overlay.js");
+
+      // Patch: universal-init
+      const uni = await injectUniversalInitIntoZip(originalZipBuffer, universalInitJs);
+      let patched = uni.patchedZip;
+
+      // Patch: overlay (BASIC tier only)
+      const overlay = await applyDiagnosticOverlayPatch(patched, overlayJs, tier);
+      patched = overlay.patchedZip;
+
+      // Normalize for hosting (move WebGL/* to root if needed)
+      const normalized = await normalizeUnityZipForHosting(patched);
+
+      // Deploy to Netlify
+      const netlify = await deployZipToNetlify(normalized.outZip);
+
+      const liveUrl = netlify.url || netlify.deployUrl;
+
+      if (!liveUrl) {
+        throw new Error("Netlify deploy succeeded but returned no live URL.");
+      }
+
+      const evidence = {
+        v: 1,
+        platformTarget,
+        tier,
+        injection: {
+          universalInit: uni.result,
+          overlay: overlay.patch,
+        },
+        hosting: {
+          normalizedBaseDir: normalized.usedBaseDir,
+          normalizedReason: normalized.reason,
+          netlify: {
+            deployId: netlify.deployId,
+            url: netlify.url,
+            deployUrl: netlify.deployUrl,
+          },
+        },
+      };
+
+      // Update PublishJob + Build
+      await prisma.publishJob.update({
+        where: { id: job.id },
+        data: {
+          status: "SUCCEEDED" as any,
+          finishedAt: new Date(),
+          liveUrl,
+          provider: "netlify",
+          providerMeta: netlify.logs,
+          evidence,
+        },
+      });
+
+      await prisma.build.update({
+        where: { id: build.id },
+        data: {
+          liveUrl,
+          reportStatus: "deployed",
+          publishedAt: new Date(),
+          publishStatus: "SUCCEEDED" as any,
+          publishEvidence: evidence,
+          // optionally track platform target on build too (if you have it)
+          platformTarget: platformTarget as any,
+        } as any,
+      });
+
+      return json(true, {
+        publishJobId: job.id,
+        certId,
+        platformTarget,
+        liveUrl,
+        reportUrl: `/report/${certId}`,
+        evidenceSummary: {
+          normalizedBaseDir: normalized.usedBaseDir,
+          wroteUniversalInit: uni.result?.wroteUniversalInit ?? false,
+          injectedUniversalInit: uni.result?.injectedIntoIndexHtml ?? false,
+          overlayInjected: overlay.patch?.injectedOverlay ?? false,
+          netlifyDeployId: netlify.deployId,
+        },
+      });
     }
 
-    // Evidence bundle (strongly recommended)
-    const evidence = {
-      v: 1,
-      platformTarget,
-      tier: build.tier,
-      input: {
-        originalName: file.name,
-        bytes: zipBuffer.length,
-        sha256: sha256(zipBuffer),
-      },
-      patched: {
-        bytes: patchedZip.length,
-        sha256: sha256(patchedZip),
-        universalInit: uni.result,
-        diagnosticOverlay: overlayPatch,
-      },
-      note:
-        "This route does not return a ZIP. Host/upload the patched artifact and confirm with action=confirm + liveUrl.",
-    };
-
-    // Persist evidence
-    await prisma.publishJob.update({
-      where: { id: publishJob.id },
-      data: {
-        evidence,
-        provider: incoming.provider ?? null,
-        providerMeta: incoming.providerMeta ?? null,
-      } as any,
-    });
-
-    await prisma.build.update({
-      where: { id: build.id },
-      data: {
-        platformTarget,
-        publishEvidence: evidence,
-      } as any,
-    });
-
-    // We are NOT returning the zip; we return instructions + job id + report link.
-    return NextResponse.json({
-      ok: true,
-      mode,
-      certId: build.certId,
-      publishJobId: publishJob.id,
-      reportUrl: `/report/${build.certId}`,
-      next: {
-        hint:
-          "Upload the patched build to the target platform/host (or publish it). Then POST /api/publish with action=confirm and liveUrl to finalize the certified live link.",
-        confirmPayloadExample: {
-          action: "confirm",
-          certId: build.certId,
-          platformTarget,
-          mode,
-          liveUrl: "https://your-live-link.example",
-          provider: incoming.provider ?? "client_dashboard",
-        },
-      },
-      // Helpful for debugging without sending files
-      evidenceSummary: {
-        inputSha256: evidence.input.sha256,
-        patchedSha256: evidence.patched.sha256,
-        universalInitOk: !!evidence.patched.universalInit?.ok,
-        overlayInjected: !!evidence.patched.diagnosticOverlay?.injectedOverlay,
-      },
-    });
+    return json(false, { error: `Unsupported Content-Type: ${ct || "missing"}` }, 415);
   } catch (err: any) {
-    const msg = err?.message || "Publish failed";
     console.error("PUBLISH ERROR", err);
-    return NextResponse.json({ ok: false, error: msg }, { status: 500 });
+    return json(false, { error: err?.message || "Publish failed" }, 500);
   }
 }
