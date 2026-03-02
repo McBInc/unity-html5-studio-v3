@@ -1,129 +1,91 @@
 // src/app/api/launch-profile/save/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { normalizeScan } from "@/lib/launch/normalizeScan";
-import { scoreLaunch } from "@/lib/launch/scoring";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function POST(req: Request) {
+function bad(msg: string, extra?: any) {
+  return NextResponse.json({ ok: false, error: msg, ...extra }, { status: 400 });
+}
+
+export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const body = await req.json().catch(() => null);
 
-    const buildId = String(body.buildId || "");
-    const targetPlatformId = body.targetPlatformId ? String(body.targetPlatformId) : null;
-    const targetHostId = body.targetHostId ? String(body.targetHostId) : null;
-    const monetizationIntent = body.monetizationIntent ? String(body.monetizationIntent) : null;
-    const distributionStrategy = body.distributionStrategy ? String(body.distributionStrategy) : null;
-
-    if (!buildId) {
-      return NextResponse.json({ error: "Missing buildId" }, { status: 400 });
-    }
-    if (!targetPlatformId || !targetHostId) {
-      return NextResponse.json(
-        { error: "Missing targetPlatformId or targetHostId" },
-        { status: 400 }
-      );
+    const buildId = typeof body?.buildId === "string" ? body.buildId.trim() : "";
+    if (!buildId || buildId === "undefined" || buildId === "null") {
+      return bad("Missing buildId");
     }
 
-    const build = await prisma.build.findUnique({
-      where: { id: buildId },
-      include: { launchProfile: true },
-    });
+    // Optional fields (keep strings consistent with your schema)
+    const hostProvider = typeof body?.hostProvider === "string" ? body.hostProvider : undefined;
+    const destinationPlatform = typeof body?.destinationPlatform === "string" ? body.destinationPlatform : undefined;
+    const goal = typeof body?.goal === "string" ? body.goal : undefined;
+    const monetization = typeof body?.monetization === "string" ? body.monetization : undefined;
 
-    if (!build) {
-      return NextResponse.json({ error: "Build not found" }, { status: 404 });
-    }
+    const targetPlatformId = typeof body?.targetPlatformId === "string" ? body.targetPlatformId : undefined;
+    const targetHostId = typeof body?.targetHostId === "string" ? body.targetHostId : undefined;
 
-    // ✅ Your schema uses Build.scanResult
-    const scanJson = build.scanResult as any;
+    const monetizationIntent = typeof body?.monetizationIntent === "string" ? body.monetizationIntent : undefined;
+    const distributionStrategy = typeof body?.distributionStrategy === "string" ? body.distributionStrategy : undefined;
 
-    if (!scanJson) {
-      return NextResponse.json({ error: "Build has no scan JSON" }, { status: 400 });
-    }
+    const readinessScore =
+      Number.isFinite(body?.readinessScore) ? Number(body.readinessScore) : undefined;
+    const platformFitScore =
+      Number.isFinite(body?.platformFitScore) ? Number(body.platformFitScore) : undefined;
+    const hostCompatibilityScore =
+      Number.isFinite(body?.hostCompatibilityScore) ? Number(body.hostCompatibilityScore) : undefined;
 
-    const [platform, host] = await Promise.all([
-      prisma.platform.findUnique({ where: { id: targetPlatformId } }),
-      prisma.host.findUnique({ where: { id: targetHostId } }),
-    ]);
+    const recommendationsJson = body?.recommendationsJson ?? undefined;
 
-    if (!platform || !host) {
-      return NextResponse.json({ error: "Platform or Host not found" }, { status: 404 });
-    }
+    // Ensure Build exists
+    const build = await prisma.build.findUnique({ where: { id: buildId } });
+    if (!build) return NextResponse.json({ ok: false, error: "Build not found" }, { status: 404 });
 
-    const acceptedCompression = safeParseJsonArray(platform.acceptedCompression);
-
-    const normalized = normalizeScan(scanJson, build);
-
-    const score = scoreLaunch(
-      normalized,
-      {
-        name: platform.name,
-        slug: platform.slug,
-        initialDownloadMaxMB: platform.initialDownloadMaxMB,
-        totalBuildMaxMB: platform.totalBuildMaxMB,
-        maxFileCount: platform.maxFileCount,
-        maxSingleFileMB: platform.maxSingleFileMB,
-        requiresCompressedBuild: platform.requiresCompressedBuild,
-        acceptedCompression,
-        requiresSdkInjection: platform.requiresSdkInjection,
-        sdkType: platform.sdkType,
-      },
-      {
-        name: host.name,
-        slug: host.slug,
-        supportsBrotli: host.supportsBrotli,
-        supportsGzip: host.supportsGzip,
-        requiresManualHeaderConfig: host.requiresManualHeaderConfig,
-        defaultSpaFallback: host.defaultSpaFallback,
-      }
-    );
-
-    const recommendationsJson = {
-      platform: { id: platform.id, name: platform.name, slug: platform.slug },
-      host: { id: host.id, name: host.name, slug: host.slug },
-      scores: score,
-      generatedAt: new Date().toISOString(),
-    };
-
-    const launchProfile = await prisma.launchProfile.upsert({
+    const lp = await prisma.launchProfile.upsert({
       where: { buildId },
       update: {
-        targetPlatformId,
-        targetHostId,
-        monetizationIntent,
-        distributionStrategy,
-        readinessScore: score.readinessScore,
-        platformFitScore: score.platformFit.score,
-        hostCompatibilityScore: score.hostCompatibility.score,
-        recommendationsJson,
+        ...(hostProvider ? { hostProvider } : {}),
+        ...(destinationPlatform ? { destinationPlatform } : {}),
+        ...(goal ? { goal } : {}),
+        ...(monetization ? { monetization } : {}),
+
+        ...(typeof targetPlatformId === "string" ? { targetPlatformId } : {}),
+        ...(typeof targetHostId === "string" ? { targetHostId } : {}),
+
+        ...(monetizationIntent !== undefined ? { monetizationIntent } : {}),
+        ...(distributionStrategy !== undefined ? { distributionStrategy } : {}),
+
+        ...(readinessScore !== undefined ? { readinessScore } : {}),
+        ...(platformFitScore !== undefined ? { platformFitScore } : {}),
+        ...(hostCompatibilityScore !== undefined ? { hostCompatibilityScore } : {}),
+
+        ...(recommendationsJson !== undefined ? { recommendationsJson } : {}),
       },
       create: {
         buildId,
-        targetPlatformId,
-        targetHostId,
-        monetizationIntent,
-        distributionStrategy,
-        readinessScore: score.readinessScore,
-        platformFitScore: score.platformFit.score,
-        hostCompatibilityScore: score.hostCompatibility.score,
-        recommendationsJson,
-      },
+        hostProvider: hostProvider || "unknown",
+        destinationPlatform: destinationPlatform || "unknown",
+        goal: goal || "test",
+        monetetization: undefined as any, // safeguard if typo exists elsewhere
+        monetization: monetization || "unknown",
+
+        targetPlatformId: targetPlatformId ?? null,
+        targetHostId: targetHostId ?? null,
+
+        monetizationIntent: monetizationIntent ?? null,
+        distributionStrategy: distributionStrategy ?? null,
+
+        readinessScore: readinessScore ?? null,
+        platformFitScore: platformFitScore ?? null,
+        hostCompatibilityScore: hostCompatibilityScore ?? null,
+        recommendationsJson: recommendationsJson ?? null,
+      } as any,
     });
 
-    return NextResponse.json({ ok: true, launchProfile, score });
+    return NextResponse.json({ ok: true, launchProfile: lp });
   } catch (err: any) {
-    console.error("launch-profile/save error:", err);
-    return NextResponse.json({ error: "Internal error" }, { status: 500 });
-  }
-}
-
-function safeParseJsonArray(s: string): string[] {
-  try {
-    const v = JSON.parse(s);
-    return Array.isArray(v) ? v.map(String) : [];
-  } catch {
-    return [];
+    return NextResponse.json({ ok: false, error: err?.message || "Save failed" }, { status: 500 });
   }
 }
