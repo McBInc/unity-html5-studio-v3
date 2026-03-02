@@ -371,7 +371,7 @@ export async function POST(req: NextRequest) {
           normalizedBaseDir: normalized.usedBaseDir,
           wroteUniversalInit: uni.result?.wroteUniversalInit ?? false,
           injectedUniversalInit: uni.result?.injectedIntoIndexHtml ?? false,
-          overlayInjected: overlay.patch?.injectedOverlay ?? false,
+          overlayInjected: overlay.patch?.injectedIntoIndexHtml ?? false,
           netlifyDeployId: netlify.deployId,
         },
       });
