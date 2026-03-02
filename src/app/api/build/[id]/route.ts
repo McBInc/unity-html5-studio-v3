@@ -5,15 +5,12 @@ import { prisma } from "@/lib/db";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
-    const id = ctx.params?.id;
+    const { id } = await ctx.params;
 
     if (!id || typeof id !== "string") {
-      return NextResponse.json(
-        { ok: false, error: "Missing build id in route param" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "Missing build id" }, { status: 400 });
     }
 
     const build = await prisma.build.findUnique({
@@ -37,6 +34,7 @@ export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
         gzipPresent: build.gzipPresent,
         liveUrl: build.liveUrl,
         scanResult: build.scanResult,
+        publishEvidence: (build as any).publishEvidence ?? null,
         project: build.project ? { id: build.project.id, name: build.project.name } : null,
         launchProfile: build.launchProfile ?? null,
         createdAt: build.createdAt,
@@ -44,9 +42,6 @@ export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
       },
     });
   } catch (err: any) {
-    return NextResponse.json(
-      { ok: false, error: err?.message || "Failed to load build" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: err?.message || "Failed to load build" }, { status: 500 });
   }
 }
