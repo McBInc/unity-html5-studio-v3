@@ -4,9 +4,13 @@ import ReportClient, { type ReportPayload } from "./report-client";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+async function resolveParams<T>(p: T | Promise<T>): Promise<T> {
+  // Works whether Next passes params as object or Promise (seen in your build/tooling)
+  return typeof (p as any)?.then === "function" ? await (p as any) : (p as any);
+}
+
 async function getInitial(certId: string): Promise<ReportPayload> {
   try {
-    // Server-side fetch to our own route — use absolute URL if available
     const host =
       process.env.VERCEL_URL
         ? `https://${process.env.VERCEL_URL}`
@@ -26,9 +30,10 @@ async function getInitial(certId: string): Promise<ReportPayload> {
 export default async function Page({
   params,
 }: {
-  params: { certId: string };
+  params: { certId: string } | Promise<{ certId: string }>;
 }) {
-  const certId = String(params?.certId || "").trim();
+  const resolved = await resolveParams(params);
+  const certId = String(resolved?.certId || "").trim();
 
   const initial = certId
     ? await getInitial(certId)
