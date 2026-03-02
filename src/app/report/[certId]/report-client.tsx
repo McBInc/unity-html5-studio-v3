@@ -3,7 +3,27 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useSession } from "next-auth/react";
 
-export type ReportPayload =
+type BuildShape = {
+  id: string;
+  certId: string | null;
+  reportStatus: string;
+  scannedAt: string | Date | null;
+  quickScore: number | null;
+  brotliPresent: boolean | null;
+  gzipPresent: boolean | null;
+  scanResult: any;
+  liveUrl: string | null;
+  clipUrl?: string | null;
+  certifiedAt?: string | Date | null;
+  project?: { id: string; name: string } | null;
+  launchProfile?: any | null;
+};
+
+type ApiWrapped =
+  | { ok: true; build: BuildShape }
+  | { ok: false; error: string; hint?: any };
+
+type ApiFlat =
   | {
       ok: true;
       certId: string;
@@ -22,6 +42,8 @@ export type ReportPayload =
     }
   | { ok: false; error: string; hint?: any };
 
+type AnyReport = ApiWrapped | ApiFlat;
+
 type MePayload = { ok: true; email: string } | { error: string };
 
 function fmtDate(d: any) {
@@ -38,78 +60,130 @@ function safeString(v: any) {
   return typeof v === "string" ? v : v == null ? "" : String(v);
 }
 
+function normalize(report: AnyReport, certIdFromUrl: string) {
+  if (!report || typeof report !== "object") {
+    return { ok: false as const, error: "Bad report payload" };
+  }
+  if ("ok" in report && report.ok === false) return report;
+
+  // Wrapped shape: { ok: true, build: {...} }
+  if ("build" in report && (report as any).build) {
+    const b = (report as any).build as BuildShape;
+    return {
+      ok: true as const,
+      certId: b.certId || certIdFromUrl || "",
+      buildId: b.id,
+      projectName: b.project?.name || "Untitled Project",
+      scannedAt: b.scannedAt ?? null,
+      quickScore: Number.isFinite(b.quickScore as any) ? Number(b.quickScore) : 0,
+      brotliPresent: !!b.brotliPresent,
+      gzipPresent: !!b.gzipPresent,
+      scan: b.scanResult ?? null,
+      launchProfile: b.launchProfile ?? null,
+      reportStatus: b.reportStatus ?? "draft",
+      certifiedAt: (b as any).certifiedAt ?? null,
+      liveUrl: b.liveUrl ?? null,
+      clipUrl: (b as any).clipUrl ?? null,
+      _raw: report,
+    };
+  }
+
+  // Flat shape (older / alternate)
+  const r = report as any;
+  return {
+    ok: true as const,
+    certId: r.certId || certIdFromUrl || "",
+    buildId: r.buildId || "",
+    projectName: r.projectName || "Untitled Project",
+    scannedAt: r.scannedAt ?? null,
+    quickScore: Number.isFinite(r.quickScore) ? Number(r.quickScore) : 0,
+    brotliPresent: !!r.brotliPresent,
+    gzipPresent: !!r.gzipPresent,
+    scan: r.scan ?? null,
+    launchProfile: r.launchProfile ?? null,
+    reportStatus: r.reportStatus ?? "draft",
+    certifiedAt: r.certifiedAt ?? null,
+    liveUrl: r.liveUrl ?? null,
+    clipUrl: r.clipUrl ?? null,
+    _raw: report,
+  };
+}
+
 export default function ReportClient({
   certId,
   initial,
 }: {
   certId: string;
-  initial: ReportPayload;
+  initial: AnyReport;
 }) {
   const { status } = useSession();
 
-  const [data, setData] = useState<ReportPayload>(initial);
+  const [raw, setRaw] = useState<any>(initial);
   const [me, setMe] = useState<MePayload | null>(null);
 
-  const [liveUrlInput, setLiveUrlInput] = useState(
-    "ok" in initial && initial.ok ? safeString(initial.liveUrl) : ""
-  );
+  const n = useMemo(() => normalize(raw as AnyReport, certId), [raw, certId]);
+
+  // Admin issue cert
+  const [liveUrlInput, setLiveUrlInput] = useState("");
   const [issuing, setIssuing] = useState(false);
   const [issueMsg, setIssueMsg] = useState<string | null>(null);
+
+  // Patch/download
+  const [zipFile, setZipFile] = useState<File | null>(null);
+  const [patching, setPatching] = useState(false);
+  const [patchMsg, setPatchMsg] = useState<string | null>(null);
 
   async function loadMe() {
     try {
       const res = await fetch("/api/me", { cache: "no-store" });
-      const json = (await res.json()) as MePayload;
-      setMe(json);
+      setMe((await res.json()) as MePayload);
     } catch {}
   }
 
   async function refreshReport() {
     if (!certId) return;
     const res = await fetch(`/api/report/${encodeURIComponent(certId)}`, { cache: "no-store" });
-    const json = (await res.json()) as ReportPayload;
-    setData(json);
-    if ("ok" in json && json.ok) setLiveUrlInput(safeString(json.liveUrl));
+    const json = await res.json().catch(() => ({ ok: false, error: "Bad JSON" }));
+    setRaw(json);
   }
+
+  useEffect(() => {
+    // Always refresh once on mount to avoid SSR quirks
+    void refreshReport();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [certId]);
 
   useEffect(() => {
     if (status === "authenticated") void loadMe();
     else setMe(null);
   }, [status]);
 
-  // IMPORTANT: refresh once on mount if initial was error
   useEffect(() => {
-    if (!("ok" in initial) || !initial.ok) void refreshReport();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (n.ok) setLiveUrlInput(safeString(n.liveUrl));
+  }, [n.ok, (n as any).liveUrl]);
 
   const isAdmin = useMemo(() => {
-    const email =
-      me && "ok" in me && (me as any).ok ? String((me as any).email || "").toLowerCase() : "";
-    return !!email;
+    const email = me && "ok" in me && (me as any).ok ? String((me as any).email || "").toLowerCase() : "";
+    return !!email; // server still enforces admin
   }, [me]);
 
   async function issueCertificate() {
     setIssueMsg(null);
     const liveUrlTrim = liveUrlInput.trim();
+    const cert = n.ok ? n.certId : certId;
 
-    if (!certId) return setIssueMsg("Internal error: missing certId");
-    if (!liveUrlTrim) return setIssueMsg("Please paste a Live URL first.");
+    if (!cert) return setIssueMsg("Internal error: missing certId");
+    if (!liveUrlTrim) return setIssueMsg("Paste a Live URL first.");
 
     setIssuing(true);
     try {
       const res = await fetch("/api/admin/set-live", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ certId, liveUrl: liveUrlTrim }),
+        body: JSON.stringify({ certId: cert, liveUrl: liveUrlTrim }),
       });
-
       const json = await res.json().catch(() => null);
-
-      if (!res.ok) {
-        setIssueMsg(json?.error || `Issue failed (${res.status})`);
-        return;
-      }
+      if (!res.ok) return setIssueMsg(json?.error || `Issue failed (${res.status})`);
 
       setIssueMsg("✅ Certificate issued.");
       await refreshReport();
@@ -120,109 +194,171 @@ export default function ReportClient({
     }
   }
 
-  if (!("ok" in data) || !data.ok) {
-    return (
-      <div style={{ padding: 20, maxWidth: 980, margin: "0 auto" }}>
-        <h1 style={{ fontSize: 28, margin: 0 }}>WebGL Certification Report</h1>
+  async function downloadPatchedZip() {
+    setPatchMsg(null);
+    if (!zipFile) return setPatchMsg("Choose a WebGL ZIP first.");
 
-        <div style={{ marginTop: 10, padding: 12, border: "1px solid #f3c2c2", background: "#fff5f5" }}>
-          <b style={{ color: "crimson" }}>Error:</b> {data.error}
-        </div>
+    setPatching(true);
+    try {
+      const form = new FormData();
+      form.append("file", zipFile);
+      form.append("certId", n.ok ? n.certId : certId);
+      form.append("tier", "BASIC");
 
-        <div style={{ marginTop: 12, opacity: 0.8, fontFamily: "monospace" }}>
-          certId prop: {String(certId || "(missing)")}
-        </div>
+      const res = await fetch("/api/patch", { method: "POST", body: form });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => null);
+        return setPatchMsg(errJson?.error || `Patch failed (${res.status})`);
+      }
 
-        {data.hint && (
-          <pre style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#0b0b0b", color: "#7CFC00", overflowX: "auto" }}>
-            {JSON.stringify(data.hint, null, 2)}
-          </pre>
-        )}
+      const blob = await res.blob();
+      const dlName = `${(n.ok ? n.certId : certId) || "patched"}-basic-patched.zip`;
 
-        <button
-          onClick={() => refreshReport()}
-          style={{ marginTop: 12, padding: "10px 14px", borderRadius: 10, border: "1px solid #111", background: "#111", color: "#fff" }}
-        >
-          Retry Load
-        </button>
-      </div>
-    );
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = dlName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      setPatchMsg("✅ Patched ZIP downloaded. Upload to Netlify, then paste Live URL below.");
+    } catch (e: any) {
+      setPatchMsg(e?.message || "Patch failed");
+    } finally {
+      setPatching(false);
+    }
   }
+
+  const headerCert = n.ok ? n.certId : certId || "(missing)";
 
   return (
     <div style={{ padding: 20, maxWidth: 980, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "baseline" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline", flexWrap: "wrap" }}>
         <div>
-          <h1 style={{ fontSize: 28, margin: 0 }}>WebGL Certification Report</h1>
+          <h1 style={{ fontSize: 32, margin: 0 }}>WebGL Certification Report</h1>
           <div style={{ marginTop: 6, opacity: 0.75 }}>
-            Project: <b>{data.projectName}</b>
+            Project: <b>{n.ok ? n.projectName : "—"}</b>
           </div>
         </div>
 
         <div style={{ textAlign: "right" }}>
           <div style={{ fontFamily: "monospace", fontSize: 12, opacity: 0.7 }}>CERT ID</div>
-          <div style={{ fontFamily: "monospace", fontWeight: 900 }}>{data.certId}</div>
+          <div style={{ fontFamily: "monospace", fontWeight: 900 }}>{headerCert}</div>
         </div>
       </div>
 
       <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#fafafa" }}>
-        <div style={{ fontSize: 12, opacity: 0.7 }}>Status</div>
-        <div style={{ marginTop: 6 }}>
-          Report: <b>{safeString(data.reportStatus || "draft")}</b>
-        </div>
-        <div style={{ marginTop: 6 }}>
-          Quick Score: <b>{data.quickScore}</b>
-        </div>
-        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-          Scanned: {fmtDate(data.scannedAt)} • Build ID: <span style={{ fontFamily: "monospace" }}>{data.buildId}</span>
-        </div>
+        <div style={{ fontWeight: 900 }}>Status</div>
+
+        {n.ok ? (
+          <>
+            <div style={{ marginTop: 8 }}>
+              Report: <b>{safeString(n.reportStatus || "draft")}</b>
+            </div>
+            <div style={{ marginTop: 6 }}>
+              Quick Score: <b>{n.quickScore}</b> • Brotli: <b>{String(n.brotliPresent)}</b>
+            </div>
+            <div style={{ marginTop: 6, fontSize: 13, opacity: 0.8 }}>
+              Scanned: {fmtDate(n.scannedAt)} • Build ID:{" "}
+              <span style={{ fontFamily: "monospace" }}>{n.buildId}</span>
+            </div>
+          </>
+        ) : (
+          <div style={{ marginTop: 8, color: "crimson" }}>Error: {safeString((n as any).error || "Report not loaded")}</div>
+        )}
+
+        <button
+          onClick={() => refreshReport()}
+          style={{ marginTop: 12, padding: "10px 14px", borderRadius: 10, border: "1px solid #111", background: "#111", color: "#fff" }}
+          type="button"
+        >
+          Reload Report
+        </button>
       </div>
 
       <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#fff" }}>
-        <div style={{ fontWeight: 900, marginBottom: 6 }}>Deployment</div>
-        {data.liveUrl ? (
+        <div style={{ fontWeight: 900, marginBottom: 6 }}>1) Generate Patched ZIP (for Netlify upload)</div>
+        <div style={{ opacity: 0.8, fontSize: 13 }}>
+          Upload the original WebGL ZIP here. We’ll inject <b>universal-init</b> + <b>diagnostic HUD overlay</b>, then you download the patched ZIP.
+        </div>
+
+        <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <input type="file" accept=".zip,application/zip,application/x-zip-compressed" onChange={(e) => setZipFile(e.target.files?.[0] || null)} />
+          <button
+            onClick={downloadPatchedZip}
+            disabled={patching}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 10,
+              border: "1px solid #111",
+              background: patching ? "#ddd" : "#111",
+              color: "#fff",
+              cursor: patching ? "not-allowed" : "pointer",
+              fontWeight: 900,
+            }}
+            type="button"
+          >
+            {patching ? "Patching…" : "Download Patched ZIP"}
+          </button>
+        </div>
+
+        {patchMsg && <div style={{ marginTop: 10, opacity: 0.9 }}>{patchMsg}</div>}
+      </div>
+
+      <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#fff" }}>
+        <div style={{ fontWeight: 900, marginBottom: 6 }}>2) Deploy + Issue Certificate</div>
+
+        {n.ok && n.liveUrl ? (
           <div style={{ opacity: 0.9 }}>
             Live URL:{" "}
-            <a href={data.liveUrl} target="_blank" rel="noreferrer" style={{ fontWeight: 900 }}>
-              {data.liveUrl}
+            <a href={n.liveUrl} target="_blank" rel="noreferrer" style={{ fontWeight: 900 }}>
+              {n.liveUrl}
             </a>
           </div>
         ) : (
           <div style={{ opacity: 0.75 }}>Live URL: Pending</div>
         )}
-        <div style={{ marginTop: 10, opacity: 0.8 }}>Issued at: {fmtDate(data.certifiedAt)}</div>
+
+        <div style={{ marginTop: 10, opacity: 0.8 }}>Issued at: {fmtDate(n.ok ? n.certifiedAt : null)}</div>
+
+        {isAdmin && (
+          <div style={{ marginTop: 14, padding: 14, borderRadius: 12, border: "1px solid #111" }}>
+            <div style={{ fontWeight: 900, marginBottom: 8 }}>Admin — Issue Certificate</div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input
+                value={liveUrlInput}
+                onChange={(e) => setLiveUrlInput(e.target.value)}
+                placeholder="Paste the Netlify Live URL (https://...)"
+                style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid #ddd", minWidth: 360, flex: 1 }}
+              />
+              <button
+                onClick={issueCertificate}
+                disabled={issuing}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  border: "1px solid #111",
+                  background: issuing ? "#ddd" : "#111",
+                  color: "#fff",
+                  cursor: issuing ? "not-allowed" : "pointer",
+                  fontWeight: 900,
+                }}
+                type="button"
+              >
+                {issuing ? "Issuing…" : "Issue Certificate"}
+              </button>
+            </div>
+            {issueMsg && <div style={{ marginTop: 10, opacity: 0.9 }}>{issueMsg}</div>}
+          </div>
+        )}
       </div>
 
-      {isAdmin && (
-        <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #111", background: "#fff" }}>
-          <div style={{ fontWeight: 900, marginBottom: 8 }}>Admin — Issue Certificate</div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-            <input
-              value={liveUrlInput}
-              onChange={(e) => setLiveUrlInput(e.target.value)}
-              placeholder="Paste the certified deployment Live URL (https://...)"
-              style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid #ddd", minWidth: 360, flex: 1 }}
-            />
-            <button
-              onClick={issueCertificate}
-              disabled={issuing}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 10,
-                border: "1px solid #111",
-                background: issuing ? "#ddd" : "#111",
-                color: "#fff",
-                cursor: issuing ? "not-allowed" : "pointer",
-                fontWeight: 900,
-              }}
-              type="button"
-            >
-              {issuing ? "Issuing…" : "Issue Certificate"}
-            </button>
-          </div>
-          {issueMsg && <div style={{ marginTop: 10, opacity: 0.9 }}>{issueMsg}</div>}
-        </div>
-      )}
+      <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#0b0b0b", color: "#7CFC00" }}>
+        <div style={{ fontFamily: "monospace", fontWeight: 900, marginBottom: 8 }}>Debug: raw /api/report response</div>
+        <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(raw, null, 2)}</pre>
+      </div>
     </div>
   );
 }
