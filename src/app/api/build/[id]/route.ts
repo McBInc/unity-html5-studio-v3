@@ -27,21 +27,30 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
       build: {
         id: build.id,
         certId: build.certId,
+
         reportStatus: build.reportStatus,
         scannedAt: build.scannedAt,
-        quickScore: build.quickScore,
-        brotliPresent: build.brotliPresent,
-        gzipPresent: build.gzipPresent,
-        liveUrl: build.liveUrl,
-        scanResult: build.scanResult,
+        quickScore: build.quickScore ?? 0,
+
+        brotliPresent: !!build.brotliPresent,
+        gzipPresent: !!build.gzipPresent,
+
+        scanResult: build.scanResult ?? null,
+
+        liveUrl: build.liveUrl ?? null,
         publishEvidence: (build as any).publishEvidence ?? null,
+
         project: build.project ? { id: build.project.id, name: build.project.name } : null,
         launchProfile: build.launchProfile ?? null,
+
         createdAt: build.createdAt,
         updatedAt: build.updatedAt,
       },
     });
   } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message || "Failed to load build" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: err?.message || "Failed to load build" },
+      { status: 500 }
+    );
   }
 }
