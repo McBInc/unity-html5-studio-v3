@@ -5,6 +5,7 @@ import { authOptions } from "@/lib/auth";
 
 import JSZip from "jszip";
 import fs from "node:fs/promises";
+import path from "node:path";
 
 import { injectUniversalInitIntoZip } from "@/lib/patchers/injectUniversalInit";
 import { applyDiagnosticOverlayPatch } from "@/lib/patches/metaZeroFriction";
@@ -48,7 +49,9 @@ async function normalizeUnityZipForHosting(zipBuffer: Buffer): Promise<{
     if (!p.startsWith(chosenBase)) continue;
     const rel = p.slice(chosenBase.length);
     if (!rel) continue;
-    const data = await zip.file(p)!.async("nodebuffer");
+    const f = zip.file(p);
+    if (!f) continue;
+    const data = await f.async("nodebuffer");
     out.file(rel, data);
   }
 
@@ -61,9 +64,15 @@ async function normalizeUnityZipForHosting(zipBuffer: Buffer): Promise<{
   };
 }
 
+async function readRepoScript(relPath: string): Promise<string> {
+  // Vercel-safe absolute path to repo file (during runtime)
+  const abs = path.join(process.cwd(), relPath);
+  return await fs.readFile(abs, "utf8");
+}
+
 export async function POST(req: NextRequest) {
   try {
-    // --- AUTH (keep consistent with rest of app) ---
+    // --- AUTH ---
     const session = await getServerSession(authOptions);
     if (!session?.user?.email) {
       return NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 });
@@ -90,9 +99,9 @@ export async function POST(req: NextRequest) {
     // --- Normalize zip (re-root) ---
     const normalized = await normalizeUnityZipForHosting(zipBuffer);
 
-    // --- Load injection scripts from repo ---
-    const universalInitJs = await fs.readFile("src/lib/scripts/universal-init.js", "utf8");
-    const overlayJs = await fs.readFile("src/lib/scripts/diagnostic-overlay.js", "utf8");
+    // --- Load injection scripts from repo (Vercel-safe paths) ---
+    const universalInitJs = await readRepoScript("src/lib/scripts/universal-init.js");
+    const overlayJs = await readRepoScript("src/lib/scripts/diagnostic-overlay.js");
 
     // --- Patch universal init ---
     const uni = await injectUniversalInitIntoZip(normalized.outZip, universalInitJs);
@@ -104,23 +113,26 @@ export async function POST(req: NextRequest) {
 
     const fileName = `${certId}-${tier.toLowerCase()}-patched.zip`;
 
-    return new NextResponse(new Uint8Array(patchedZip), {
-      status: 200,
-      headers: {
-        "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="${fileName}"`,
-        "Cache-Control": "no-store",
-        // Debug header you can inspect in DevTools → Network → Response Headers
-        "X-Patch-Result": JSON.stringify({
-          ok: true,
-          certId,
-          tier,
-          normalize: { usedBaseDir: normalized.usedBaseDir, reason: normalized.reason },
-          universalInit: uni?.result ?? null,
-          overlay: ov?.patch ?? null,
-        }),
-      },
-    });
+    // Keep debug headers TINY (avoid header size limits)
+    const debugSummary = {
+      normalizeBase: normalized.usedBaseDir,
+      universalOk: !!uni?.result?.ok,
+      overlayOk: !!ov?.patch?.ok,
+    };
+
+    const body = new Uint8Array(patchedZip);
+
+return new NextResponse(body, {
+  status: 200,
+  headers: {
+    "Content-Type": "application/zip",
+    "Content-Disposition": `attachment; filename="${fileName}"`,
+    "Cache-Control": "no-store",
+    "Content-Length": String(body.byteLength),
+    "X-H5S-Patch": JSON.stringify(debugSummary),
+  },
+});
+
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: err?.message || "Patch failed" }, { status: 500 });
   }
