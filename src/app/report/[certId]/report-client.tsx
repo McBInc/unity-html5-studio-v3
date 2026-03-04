@@ -128,9 +128,7 @@ export default function ReportClient({
   const [issuing, setIssuing] = useState(false);
   const [issueMsg, setIssueMsg] = useState<string | null>(null);
 
-  // Patch/download
-  const [zipFile, setZipFile] = useState<File | null>(null);
-  const [patching, setPatching] = useState(false);
+  // Patch/download (now redirects to /, no ZIP upload here)
   const [patchMsg, setPatchMsg] = useState<string | null>(null);
 
   async function loadMe() {
@@ -194,41 +192,12 @@ export default function ReportClient({
     }
   }
 
-  async function downloadPatchedZip() {
-    setPatchMsg(null);
-    if (!zipFile) return setPatchMsg("Choose a WebGL ZIP first.");
-
-    setPatching(true);
-    try {
-      const form = new FormData();
-      form.append("file", zipFile);
-      form.append("certId", n.ok ? n.certId : certId);
-      form.append("tier", "BASIC");
-
-      const res = await fetch("/api/patch", { method: "POST", body: form });
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => null);
-        return setPatchMsg(errJson?.error || `Patch failed (${res.status})`);
-      }
-
-      const blob = await res.blob();
-      const dlName = `${(n.ok ? n.certId : certId) || "patched"}-basic-patched.zip`;
-
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = dlName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-
-      setPatchMsg("✅ Patched ZIP downloaded. Upload to Netlify, then paste Live URL below.");
-    } catch (e: any) {
-      setPatchMsg(e?.message || "Patch failed");
-    } finally {
-      setPatching(false);
-    }
+  function goDownloadFixPack() {
+    const id = (n.ok ? n.certId : certId) || "";
+    // We route back to / and let the user generate the ZIP locally (no /api/patch upload).
+    // Pass certId so the homepage can show "continue from this cert" later if you add that.
+    const url = id ? `/?certId=${encodeURIComponent(id)}` : "/";
+    window.location.href = url;
   }
 
   const headerCert = n.ok ? n.certId : certId || "(missing)";
@@ -279,28 +248,27 @@ export default function ReportClient({
       </div>
 
       <div style={{ marginTop: 16, padding: 16, borderRadius: 14, border: "1px solid #eee", background: "#fff" }}>
-        <div style={{ fontWeight: 900, marginBottom: 6 }}>1) Generate Patched ZIP (for Netlify upload)</div>
+        <div style={{ fontWeight: 900, marginBottom: 6 }}>1) Download FixPack ZIP (Repo-Ready)</div>
         <div style={{ opacity: 0.8, fontSize: 13 }}>
-          Upload the original WebGL ZIP here. We’ll inject <b>universal-init</b> + <b>diagnostic HUD overlay</b>, then you download the patched ZIP.
+          We removed the second ZIP upload here because large WebGL ZIPs can trigger <b>413</b> on hosted patch endpoints.
+          Download the FixPack from the home page (it is generated locally in your browser).
         </div>
 
         <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <input type="file" accept=".zip,application/zip,application/x-zip-compressed" onChange={(e) => setZipFile(e.target.files?.[0] || null)} />
           <button
-            onClick={downloadPatchedZip}
-            disabled={patching}
+            onClick={goDownloadFixPack}
             style={{
               padding: "10px 14px",
               borderRadius: 10,
               border: "1px solid #111",
-              background: patching ? "#ddd" : "#111",
+              background: "#111",
               color: "#fff",
-              cursor: patching ? "not-allowed" : "pointer",
+              cursor: "pointer",
               fontWeight: 900,
             }}
             type="button"
           >
-            {patching ? "Patching…" : "Download Patched ZIP"}
+            Go to Download FixPack →
           </button>
         </div>
 
