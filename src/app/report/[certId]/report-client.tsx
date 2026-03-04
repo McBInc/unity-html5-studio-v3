@@ -25,21 +25,21 @@ type ApiWrapped =
 
 type ApiFlat =
   | {
-      ok: true;
-      certId: string;
-      buildId: string;
-      projectName: string;
-      scannedAt: string | Date | null;
-      quickScore: number;
-      brotliPresent: boolean;
-      gzipPresent: boolean;
-      scan: any;
-      launchProfile: any;
-      reportStatus?: string | null;
-      certifiedAt?: string | Date | null;
-      liveUrl?: string | null;
-      clipUrl?: string | null;
-    }
+    ok: true;
+    certId: string;
+    buildId: string;
+    projectName: string;
+    scannedAt: string | Date | null;
+    quickScore: number;
+    brotliPresent: boolean;
+    gzipPresent: boolean;
+    scan: any;
+    launchProfile: any;
+    reportStatus?: string | null;
+    certifiedAt?: string | Date | null;
+    liveUrl?: string | null;
+    clipUrl?: string | null;
+  }
   | { ok: false; error: string; hint?: any };
 
 type AnyReport = ApiWrapped | ApiFlat;
@@ -135,7 +135,7 @@ export default function ReportClient({
     try {
       const res = await fetch("/api/me", { cache: "no-store" });
       setMe((await res.json()) as MePayload);
-    } catch {}
+    } catch { }
   }
 
   async function refreshReport() {
@@ -184,6 +184,10 @@ export default function ReportClient({
       if (!res.ok) return setIssueMsg(json?.error || `Issue failed (${res.status})`);
 
       setIssueMsg("✅ Certificate issued.");
+      if (json.updated?.certId && json.updated.certId !== cert) {
+        window.location.href = `/report/${json.updated.certId}`;
+        return;
+      }
       await refreshReport();
     } catch (e: any) {
       setIssueMsg(e?.message || "Issue failed");
@@ -229,6 +233,131 @@ export default function ReportClient({
             <div style={{ marginTop: 6 }}>
               Quick Score: <b>{n.quickScore}</b> • Brotli: <b>{String(n.brotliPresent)}</b>
             </div>
+            {n.scan?.meta && (
+              <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#fff5f5", border: "1px solid #ffdddd", color: "#d32f2f" }}>
+                <div style={{ fontWeight: 900, display: "flex", justifyContent: "space-between" }}>
+                  <span>⚠️ META SUNSET: SEPT 30</span>
+                  <span>Compliance Score: {n.scan.meta.score}/100</span>
+                </div>
+                <div style={{ fontSize: 13, marginTop: 4 }}>
+                  {n.scan.meta.criticalFailures?.length > 0 ? (
+                    <span>
+                      <b>Action Required:</b> Failures detected. Upgrade to Certified Migration to inject SDK v8.0 and patch legacy PII leaks.
+                    </span>
+                  ) : (
+                    <span>
+                      <b>Zero-Friction Ready:</b> Build passes v8.0 and privacy checks.
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+            {n.scan?.discord && (
+              <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#f0f4ff", border: "1px solid #c2d1ff", color: "#314cb6" }}>
+                <div style={{ fontWeight: 900, display: "flex", justifyContent: "space-between" }}>
+                  <span>📢 DISCORD PERMISSION SPLIT (FEB 23)</span>
+                  <span>Compliance Score: {n.scan.discord.score}/100</span>
+                </div>
+                <div style={{ fontSize: 13, marginTop: 4 }}>
+                  {n.scan.discord.criticalFailures?.length > 0 ? (
+                    <span>
+                      <b>Action Required:</b> Failures detected. Upgrade to Certified Migration to inject SDK v1.8 and patch legacy scopes (`MANAGE_GUILD`).
+                    </span>
+                  ) : (
+                    <span>
+                      <b>Compliance Passed:</b> Build passes v1.8 and granular privacy checks.
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+            {n.scan?.youtube && (
+              <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#ffebee", border: "1px solid #ffcdd2", color: "#c62828" }}>
+                <div style={{ fontWeight: 900, display: "flex", justifyContent: "space-between" }}>
+                  <span>🚨 YOUTUBE PLAYABLES RESTRICTIONS</span>
+                  <span>Compliance Score: {n.scan.youtube.score}/100</span>
+                </div>
+                <div style={{ fontSize: 13, marginTop: 4 }}>
+                  <div style={{ marginBottom: 4 }}>
+                    <b>Initial Bundle:</b> {n.scan.youtube.metrics.initialBundleSizeMiB} MiB / 30 MiB
+                    <span style={{ marginLeft: 8 }}>|</span>
+                    <span style={{ marginLeft: 8 }}><b>Total:</b> {n.scan.youtube.metrics.totalBundleSizeMiB} MiB / 250 MiB</span>
+                  </div>
+                  {n.scan.youtube.criticalFailures?.length > 0 ? (
+                    <span>
+                      <b>Action Required:</b> Constraints violated (Size / Strict relative pathing). Please review the integration constraints.
+                    </span>
+                  ) : (
+                    <span>
+                      <b>Compliance Passed:</b> File limits, memory heap, pathing rules, and SDK constraints are met.
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+            {n.scan?.tiktok && (
+              <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#000000", border: "1px solid #333333", color: "#69C9D0" }}>
+                <div style={{ fontWeight: 900, display: "flex", justifyContent: "space-between" }}>
+                  <span><span style={{ color: "#EE1D52" }}>🎵</span> TIKTOK UX STANDARDS </span>
+                  <span>Compliance Score: {n.scan.tiktok.score}/100</span>
+                </div>
+                <div style={{ fontSize: 13, marginTop: 4, color: "#FFFFFF" }}>
+                  {n.scan.tiktok.criticalFailures?.length > 0 ? (
+                    <span>
+                      <b>Action Required:</b> Constraints violated. Upgrade to Certified Migration to inject the TikTok Canvas Bridge to prevent "Swipe to Exit" lag.
+                    </span>
+                  ) : (
+                    <span>
+                      <b>Compliance Passed:</b> Touch-Event suppression and Safe-Area layouts are verified.
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+            {n.scan?.linkedin && (
+              <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#f0f7fc", border: "1px solid #c2e0f4", color: "#006097" }}>
+                <div style={{ fontWeight: 900, display: "flex", justifyContent: "space-between" }}>
+                  <span><span style={{ color: "#0a66c2" }}>👔</span> LINKEDIN B2B PRIVACY AUDIT </span>
+                  <span>Compliance Score: {n.scan.linkedin.score}/100</span>
+                </div>
+                <div style={{ fontSize: 13, marginTop: 4 }}>
+                  {n.scan.linkedin.criticalFailures?.length > 0 ? (
+                    <span>
+                      <b>Action Required:</b> Unconsented Analytics/PII detected! Upgrade to Certified Migration to inject the Corporate Firewall and remove rogue pixels.
+                    </span>
+                  ) : (
+                    <span>
+                      <b>Compliance Passed:</b> Zero-PII constraints verified. The build is safe for Enterprise B2B distribution.
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+            {n.scan?.telegram && (
+              <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#f0f8ff", border: "1px solid #c2e0ff", color: "#0088cc" }}>
+                <div style={{ fontWeight: 900, display: "flex", justifyContent: "space-between" }}>
+                  <span><span style={{ color: "#2AABEE" }}>✈️</span> TELEGRAM MINI APP STANDARDS </span>
+                  <span>Compliance Score: {n.scan.telegram.score}/100</span>
+                </div>
+                <div style={{ fontSize: 13, marginTop: 4 }}>
+                  {n.scan.telegram.criticalFailures?.some((f: any) => f.id.includes("TG_SDK_MISSING")) && (
+                    <div style={{ marginBottom: 4 }}>
+                      <b>Action Required:</b> Web App SDK missing. Upgrade to Certified Migration to inject the Telegram Bridge. This unlocks fullscreen mode and protects URL routing!
+                    </div>
+                  )}
+                  {n.scan.telegram.criticalFailures?.some((f: any) => f.id === "TMA_STARS_STUB") && (
+                    <div style={{ marginBottom: 4 }}>
+                      <b>Warning:</b> No Stars bridge found! Scan Assets/Plugins for TelegramPayment.jslib. Required for Producer tier revenue via Telegram Stars.
+                    </div>
+                  )}
+                  {(!n.scan.telegram.criticalFailures || n.scan.telegram.criticalFailures.length === 0) && (
+                    <div>
+                      <b>Compliance Passed:</b> The Web App expanding viewport bridge is locked in. Ready for the Telegram community!
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             <div style={{ marginTop: 6, fontSize: 13, opacity: 0.8 }}>
               Scanned: {fmtDate(n.scannedAt)} • Build ID:{" "}
               <span style={{ fontFamily: "monospace" }}>{n.buildId}</span>

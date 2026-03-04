@@ -81,16 +81,30 @@ export async function POST(req: NextRequest) {
     const build = await prisma.build.findFirst({
       where: { certId },
       orderBy: { scannedAt: "desc" },
-      select: { id: true, certId: true },
+      select: { id: true, certId: true, platformTarget: true },
     });
 
     if (!build) {
       return NextResponse.json({ ok: false, error: "Build not found for certId" }, { status: 404 });
     }
 
+    let newCertId = build.certId || "";
+    if (build.platformTarget === "META" && !newCertId.includes("-META-")) {
+      newCertId = newCertId.replace("WGL-CERT-", "WGL-CERT-META-");
+    } else if (build.platformTarget === "DISCORD" && !newCertId.includes("-DISC-")) {
+      newCertId = newCertId.replace("WGL-CERT-", "WGL-CERT-DISC-");
+    } else if (build.platformTarget === "YOUTUBE_PLAYABLES" && !newCertId.includes("-YT-")) {
+      newCertId = newCertId.replace("WGL-CERT-", "WGL-CERT-YT-");
+    } else if (build.platformTarget === "LINKEDIN_GAMES" && !newCertId.includes("-ENT-")) {
+      newCertId = newCertId.replace("WGL-CERT-", "WGL-CERT-ENT-");
+    } else if (build.platformTarget === "TELEGRAM" && !newCertId.includes("-TG-")) {
+      newCertId = newCertId.replace("WGL-CERT-", "WGL-CERT-TG-");
+    }
+
     const updated = await prisma.build.update({
       where: { id: build.id },
       data: {
+        certId: newCertId,
         liveUrl,
         reportStatus: "issued",
         certifiedAt: new Date(),

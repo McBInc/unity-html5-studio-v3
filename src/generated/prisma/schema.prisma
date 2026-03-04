@@ -1,0 +1,268 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id                 String          @id @default(cuid())
+  email              String          @unique
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  emailVerified      DateTime?
+  image              String?
+  name               String?
+  fixPackUses        Int             @default(0)
+  subscriptionActive Boolean         @default(false)
+  accounts           Account[]
+  authenticators     Authenticator[]
+  builds             Build[]
+  entitlements       Entitlement[]
+  projects           Project[]
+  sessions           Session[]
+}
+
+model Entitlement {
+  id                String    @id @default(cuid())
+  email             String?
+  stripeCustomerId  String?   @unique
+  stripeSubId       String?   @unique
+  plan              String    @default("free")
+  status            String    @default("inactive")
+  expiresAt         DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  checkoutSessionId String?   @unique
+  userId            String?
+  user              User?     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([email])
+}
+
+model Project {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  builds    Build[]
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model Build {
+  id               String         @id @default(cuid())
+  userId           String
+  projectId        String
+  buildNumber      Int?
+  versionLabel     String?
+  status           String         @default("scanned")
+  scanResult       Json?
+  scannedAt        DateTime?
+  quickScore       Int?
+  brotliPresent    Boolean?
+  gzipPresent      Boolean?
+  uploadStorageKey String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  allocationAt     DateTime?
+  certId           String?        @unique
+  certifiedAt      DateTime?
+  clipUrl          String?
+  liveUrl          String?
+  reportStatus     String         @default("draft")
+  tier             String         @default("BASIC")
+  platformTarget   PlatformTarget @default(WEB)
+  publishStatus    PublishStatus?
+  publishedAt      DateTime?
+  publishEvidence  Json?
+  project          Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fixPacks         FixPack[]
+  launchProfile    LaunchProfile?
+  publishJobs      PublishJob[]
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([platformTarget])
+  @@index([publishStatus])
+}
+
+model PublishJob {
+  id             String         @id @default(cuid())
+  buildId        String
+  platformTarget PlatformTarget
+  mode           PublishMode    @default(ASSISTED)
+  liveUrl        String?
+  provider       String?
+  providerMeta   Json?
+  status         PublishStatus  @default(QUEUED)
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  error          String?
+  evidence       Json?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @default(now()) @updatedAt
+  build          Build          @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  @@index([buildId])
+  @@index([status])
+  @@index([platformTarget])
+}
+
+model CertSequence {
+  id        Int      @id @default(1)
+  nextValue Int      @default(1)
+  updatedAt DateTime @updatedAt
+}
+
+model LaunchProfile {
+  id                     String    @id @default(cuid())
+  buildId                String    @unique
+  hostProvider           String    @default("unknown")
+  destinationPlatform    String    @default("unknown")
+  goal                   String    @default("test")
+  monetization           String    @default("unknown")
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  distributionStrategy   String?
+  hostCompatibilityScore Int?
+  monetizationIntent     String?
+  platformFitScore       Int?
+  readinessScore         Int?
+  recommendationsJson    Json?
+  targetHostId           String?
+  targetPlatformId       String?
+  build                  Build     @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  targetHost             Host?     @relation(fields: [targetHostId], references: [id])
+  targetPlatform         Platform? @relation(fields: [targetPlatformId], references: [id])
+
+  @@index([targetPlatformId])
+  @@index([targetHostId])
+}
+
+model FixPack {
+  id                  String   @id @default(cuid())
+  buildId             String
+  hostProvider        String
+  destinationPlatform String?
+  version             String   @default("v1")
+  storageKey          String?
+  createdAt           DateTime @default(now())
+  build               Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
+}
+
+model Platform {
+  id                      String          @id @default(cuid())
+  name                    String
+  slug                    String          @unique
+  initialDownloadMaxMB    Int?
+  totalBuildMaxMB         Int?
+  maxFileCount            Int?
+  maxSingleFileMB         Int?
+  requiresCompressedBuild Boolean         @default(false)
+  acceptedCompression     String
+  requiresSdkInjection    Boolean         @default(false)
+  sdkType                 String?
+  notes                   String?
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+  launchProfiles          LaunchProfile[]
+}
+
+model Host {
+  id                         String          @id @default(dbgenerated("(gen_random_uuid())::text"))
+  name                       String
+  slug                       String          @unique
+  supportsBrotli             Boolean         @default(false)
+  supportsGzip               Boolean         @default(true)
+  requiresManualHeaderConfig Boolean         @default(false)
+  defaultSpaFallback         Boolean         @default(true)
+  maxFileSizeMB              Int?
+  edgeNetwork                String?
+  notes                      String?
+  createdAt                  DateTime        @default(now())
+  updatedAt                  DateTime        @updatedAt
+  launchProfiles             LaunchProfile[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model Authenticator {
+  credentialID         String  @unique
+  userId               String
+  providerAccountId    String
+  credentialPublicKey  Bytes
+  counter              Int
+  credentialDeviceType String
+  credentialBackedUp   Boolean
+  transports           String?
+  user                 User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, credentialID])
+}
+
+enum PlatformTarget {
+  WEB
+  MOBILE_WEB
+  TELEGRAM
+  META
+  DISCORD
+  TIKTOK
+  YOUTUBE_PLAYABLES
+  LINKEDIN_GAMES
+}
+
+enum PublishMode {
+  WE_PUBLISH
+  ASSISTED
+}
+
+enum PublishStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}

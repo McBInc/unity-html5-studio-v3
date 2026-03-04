@@ -5,6 +5,12 @@ import os from "os";
 import fs from "fs/promises";
 import AdmZip from "adm-zip";
 import { z } from "zod";
+import { auditMetaCompliance } from "./metaCompliance";
+import { auditDiscordCompliance } from "./discordAudit";
+import { auditYoutubeBundleCompliance } from "./bundleAudit";
+import { auditTiktokCompliance } from "./tiktokAudit";
+import { auditLinkedinCompliance } from "./linkedinAudit";
+import { auditTelegramCompliance } from "./telegramAudit";
 
 /**
  * Server-safe WebGL ZIP scanner (no system binaries)
@@ -17,7 +23,7 @@ import { z } from "zod";
  * - Adds deployability + basic host recommendation + compatibility matrix
  * - Keeps existing fields for backward compatibility
  */
-export async function scanWebglBuildZip(zipBuffer: Buffer) {
+export async function scanWebglBuildZip(zipBuffer: Buffer, platformTarget?: string) {
   const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "webgl-build-"));
 
   try {
@@ -110,6 +116,27 @@ export async function scanWebglBuildZip(zipBuffer: Buffer) {
 
     const recommendedHost = pickRecommendedHost(compatibility);
 
+    let metaComplianceResult: any = undefined;
+    let discordComplianceResult: any = undefined;
+    let youtubeComplianceResult: any = undefined;
+    let tiktokComplianceResult: any = undefined;
+    let linkedinComplianceResult: any = undefined;
+    let telegramComplianceResult: any = undefined;
+
+    if (platformTarget === "META") {
+      metaComplianceResult = await auditMetaCompliance(tmpRoot, buildDir, projectRoot);
+    } else if (platformTarget === "DISCORD") {
+      discordComplianceResult = await auditDiscordCompliance(tmpRoot, buildDir, projectRoot);
+    } else if (platformTarget === "YOUTUBE_PLAYABLES") {
+      youtubeComplianceResult = await auditYoutubeBundleCompliance(tmpRoot, buildDir, projectRoot);
+    } else if (platformTarget === "TIKTOK") {
+      tiktokComplianceResult = await auditTiktokCompliance(tmpRoot, buildDir, projectRoot);
+    } else if (platformTarget === "LINKEDIN_GAMES") {
+      linkedinComplianceResult = await auditLinkedinCompliance(tmpRoot, buildDir, projectRoot);
+    } else if (platformTarget === "TELEGRAM") {
+      telegramComplianceResult = await auditTelegramCompliance(tmpRoot, buildDir, projectRoot);
+    }
+
     // Keep the existing hosting_checks, but make them consistent with detection
     const hosting_checks = [
       {
@@ -164,12 +191,18 @@ export async function scanWebglBuildZip(zipBuffer: Buffer) {
       compatibility,
       recommended_host: recommendedHost,
       recommended_fixpack: recommendedHost, // maps directly to your fixpack presets
+      meta: metaComplianceResult,
+      discord: discordComplianceResult,
+      youtube: youtubeComplianceResult,
+      tiktok: tiktokComplianceResult,
+      linkedin: linkedinComplianceResult,
+      telegram: telegramComplianceResult,
     };
 
     return BuildScanSchema.parse(report);
   } finally {
     // Cleanup temp folder (prevents disk growth on serverless)
-    await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => { });
   }
 }
 
@@ -277,6 +310,141 @@ const BuildScanSchema = z.object({
   recommended_fixpack: z
     .enum(["vercel", "netlify", "apache", "nginx", "github_pages"])
     .optional(),
+
+  meta: z
+    .object({
+      platform: z.literal("FACEBOOK"),
+      auditDate: z.string(),
+      score: z.number(),
+      criticalFailures: z.array(
+        z.object({
+          id: z.string(),
+          description: z.string(),
+          sunsetRisk: z.string(),
+        })
+      ),
+      monetizationReadiness: z.object({
+        cmpEligible: z.boolean(),
+        missingBridge: z.string().nullable(),
+      }),
+      checks: z.object({
+        sdk_v8: z.boolean(),
+        zero_perm: z.boolean(),
+      })
+    })
+    .optional(),
+
+  discord: z
+    .object({
+      platform: z.literal("DISCORD"),
+      auditDate: z.string(),
+      score: z.number(),
+      criticalFailures: z.array(
+        z.object({
+          id: z.string(),
+          description: z.string(),
+          sunsetRisk: z.string(),
+        })
+      ),
+      monetizationReadiness: z.object({
+        cmpEligible: z.boolean(),
+        missingBridge: z.string().nullable(),
+      }),
+      checks: z.object({
+        sdk_v1_8: z.boolean(),
+        granular_scopes: z.boolean(),
+      })
+    })
+    .optional(),
+
+  youtube: z
+    .object({
+      platform: z.literal("YOUTUBE_PLAYABLES"),
+      auditDate: z.string(),
+      score: z.number(),
+      criticalFailures: z.array(
+        z.object({
+          id: z.string(),
+          description: z.string(),
+          sunsetRisk: z.string(),
+        })
+      ),
+      metrics: z.object({
+        initialBundleSizeMiB: z.number(),
+        totalBundleSizeMiB: z.number(),
+        largestFileMiB: z.number(),
+        memoryHeapLimit: z.number().nullable(),
+      }),
+      checks: z.object({
+        max_file_size_ok: z.boolean(),
+        initial_bundle_size_ok: z.boolean(),
+        max_bundle_size_ok: z.boolean(),
+        naming_conventions_ok: z.boolean(),
+        sdk_present: z.boolean(),
+        heap_limit_ok: z.boolean(),
+        absolute_paths_ok: z.boolean(),
+      })
+    })
+    .optional(),
+
+  tiktok: z
+    .object({
+      platform: z.literal("TIKTOK"),
+      auditDate: z.string(),
+      score: z.number(),
+      criticalFailures: z.array(
+        z.object({
+          id: z.string(),
+          description: z.string(),
+          sunsetRisk: z.string(),
+        })
+      ),
+      checks: z.object({
+        touch_action_locked: z.boolean(),
+      })
+    })
+    .optional(),
+
+  linkedin: z
+    .object({
+      platform: z.literal("LINKEDIN"),
+      auditDate: z.string(),
+      score: z.number(),
+      criticalFailures: z.array(
+        z.object({
+          id: z.string(),
+          description: z.string(),
+          sunsetRisk: z.string(),
+        })
+      ),
+      checks: z.object({
+        zero_pii_ok: z.boolean(),
+      })
+    })
+    .optional(),
+
+  telegram: z
+    .object({
+      platform: z.literal("TELEGRAM"),
+      auditDate: z.string(),
+      score: z.number(),
+      criticalFailures: z.array(
+        z.object({
+          id: z.string(),
+          description: z.string(),
+          sunsetRisk: z.string(),
+        })
+      ),
+      monetizationReadiness: z.object({
+        cmpEligible: z.boolean(),
+        missingBridge: z.string().nullable(),
+      }),
+      checks: z.object({
+        sdk_present: z.boolean(),
+        stars_stub: z.boolean(),
+      })
+    })
+    .optional(),
 });
 
 /* ---------------- Helpers ---------------- */
@@ -293,12 +461,12 @@ async function findBuildDir(root: string) {
 
     const hasData = files.some(
       (n) =>
-        n.endsWith(".data") || n.endsWith(".data.br") || n.endsWith(".data.gz")
+        n.endsWith(".data") || n.endsWith(".data.br") || n.endsWith(".data.gz") || n.endsWith(".data.unityweb")
     );
 
     const hasWasm = files.some(
       (n) =>
-        n.endsWith(".wasm") || n.endsWith(".wasm.br") || n.endsWith(".wasm.gz")
+        n.endsWith(".wasm") || n.endsWith(".wasm.br") || n.endsWith(".wasm.gz") || n.endsWith(".wasm.unityweb")
     );
 
     if (path.basename(cur).toLowerCase() === "build" && hasData && hasWasm) {
@@ -429,8 +597,8 @@ function computeHostCompatibility(opts: {
       reason: !deployable
         ? "Build structure missing required files."
         : needsHeaders
-        ? "Compressed assets require correct headers (Content-Encoding + MIME)."
-        : undefined,
+          ? "Compressed assets require correct headers (Content-Encoding + MIME)."
+          : undefined,
     },
     netlify: {
       compatible: deployable,
@@ -438,8 +606,8 @@ function computeHostCompatibility(opts: {
       reason: !deployable
         ? "Build structure missing required files."
         : needsHeaders
-        ? "Compressed assets require correct headers (Content-Encoding + MIME)."
-        : undefined,
+          ? "Compressed assets require correct headers (Content-Encoding + MIME)."
+          : undefined,
     },
     apache: {
       compatible: deployable,
@@ -447,8 +615,8 @@ function computeHostCompatibility(opts: {
       reason: !deployable
         ? "Build structure missing required files."
         : needsHeaders
-        ? "Requires server config for Content-Encoding + MIME."
-        : undefined,
+          ? "Requires server config for Content-Encoding + MIME."
+          : undefined,
     },
     nginx: {
       compatible: deployable,
@@ -456,8 +624,8 @@ function computeHostCompatibility(opts: {
       reason: !deployable
         ? "Build structure missing required files."
         : needsHeaders
-        ? "Requires server config for Content-Encoding + MIME."
-        : undefined,
+          ? "Requires server config for Content-Encoding + MIME."
+          : undefined,
     },
     github_pages: {
       compatible: deployable && compressionMode === "none",
@@ -466,8 +634,8 @@ function computeHostCompatibility(opts: {
         !deployable
           ? "Build structure missing required files."
           : compressionMode !== "none"
-          ? "GitHub Pages cannot reliably set Content-Encoding headers for pre-compressed Unity assets."
-          : undefined,
+            ? "GitHub Pages cannot reliably set Content-Encoding headers for pre-compressed Unity assets."
+            : undefined,
     },
   };
 }

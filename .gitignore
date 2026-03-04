@@ -1,25 +1,43 @@
-node_modules
-.next
-.env.local
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
 .DS_Store
+*.pem
 
-.vercel
-src/generated
-/generated/prisma
-# Environment variables
-.env
-.env.local
-.env.*.local
-*.mp4
-*.mov
-*.zip
-*.pdf
-echo "*.mp4" >> .gitignore
-echo "*.zip" >> .gitignore
-*.mp4
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# local notes
-html5studio-*.txt
-dependency-map.txt
-src/lib/scripts/patch-zip-local.*
+# local env files
 .env*.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Test outputs
+*.zip
+!Karting_MicrogameWebGL.zip
+!Dragon_Crashers_WebGL.zip
+!WebGL_Build.zip
+!boomers-global-quest_netlify_repo-ready.zip
+mega-test-out.json

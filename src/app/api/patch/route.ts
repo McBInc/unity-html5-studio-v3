@@ -8,7 +8,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { injectUniversalInitIntoZip } from "@/lib/patchers/injectUniversalInit";
-import { applyDiagnosticOverlayPatch } from "@/lib/patches/metaZeroFriction";
+import { applyDiagnosticOverlayPatch, applyMetaPatch } from "@/lib/patches/metaZeroFriction";
+import { applyDiscordBasicPatch, applyDiscordProducerPatch } from "@/lib/patches/discordPatcher";
+import { applyYoutubePatch } from "@/lib/patches/youtubePatcher";
+import { applyTiktokPatch } from "@/lib/patches/tiktokPatcher";
+import { applyLinkedinPatch } from "@/lib/patches/linkedinPatcher";
+import { applyTelegramPatch } from "@/lib/patches/telegramPatcher";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -102,6 +107,7 @@ export async function POST(req: NextRequest) {
     // --- Load injection scripts from repo (Vercel-safe paths) ---
     const universalInitJs = await readRepoScript("src/lib/scripts/universal-init.js");
     const overlayJs = await readRepoScript("src/lib/scripts/diagnostic-overlay.js");
+    const platformTarget = String(form.get("platformTarget") || "").toUpperCase();
 
     // --- Patch universal init ---
     const uni = await injectUniversalInitIntoZip(normalized.outZip, universalInitJs);
@@ -109,7 +115,59 @@ export async function POST(req: NextRequest) {
     // --- Patch HUD overlay (BASIC includes overlay) ---
     const ov = await applyDiagnosticOverlayPatch(uni.outZip ?? normalized.outZip, overlayJs, tier);
 
-    const patchedZip = ov.outZip ?? uni.outZip ?? normalized.outZip;
+    let finalZip = ov.outZip ?? uni.outZip ?? normalized.outZip;
+
+    // --- Meta Patch ---
+    let metaOk = false;
+    let discordOk = false;
+    let youtubeOk = false;
+    let tiktokOk = false;
+    let linkedinOk = false;
+    let telegramOk = false;
+
+    if (platformTarget === "META") {
+      const fbInitJs = await readRepoScript("src/lib/scripts/fb-init-v8.js");
+      const metaMonetizationJslib = await readRepoScript("src/assets/Plugins/WebGL/MetaMonetization.jslib");
+      const metaPatch = await applyMetaPatch(finalZip, fbInitJs, metaMonetizationJslib);
+      finalZip = metaPatch.patchedZip;
+      metaOk = metaPatch.patch.ok;
+    } else if (platformTarget === "DISCORD") {
+      if (tier === "BASIC") {
+        const hudJs = await readRepoScript("src/lib/scripts/discord-hud.js");
+        const patchRes = await applyDiscordBasicPatch(finalZip, hudJs);
+        finalZip = patchRes.patchedZip;
+        discordOk = patchRes.patch.ok;
+      } else {
+        const initJs = await readRepoScript("src/lib/scripts/discord-init-2026.js");
+        const commJs = await readRepoScript("src/assets/Plugins/WebGL/DiscordCommerce.jslib");
+        const patchRes = await applyDiscordProducerPatch(finalZip, initJs, commJs);
+        finalZip = patchRes.patchedZip;
+        discordOk = patchRes.patch.ok;
+      }
+    } else if (platformTarget === "YOUTUBE_PLAYABLES") {
+      const initJs = await readRepoScript("src/lib/scripts/youtube-init.js");
+      const wrapperJslib = await readRepoScript("src/assets/Plugins/WebGL/YTGameWrapper.jslib");
+      const patchRes = await applyYoutubePatch(finalZip, initJs, wrapperJslib);
+      finalZip = patchRes.patchedZip;
+      youtubeOk = patchRes.patch.ok;
+    } else if (platformTarget === "TIKTOK") {
+      const bridgeJs = await readRepoScript("src/lib/scripts/tiktokBridge.js");
+      const patchRes = await applyTiktokPatch(finalZip, bridgeJs);
+      finalZip = patchRes.patchedZip;
+      tiktokOk = patchRes.patch.ok;
+    } else if (platformTarget === "LINKEDIN_GAMES") {
+      const initJs = await readRepoScript("src/lib/scripts/linkedin-init.js");
+      const patchRes = await applyLinkedinPatch(finalZip, initJs);
+      finalZip = patchRes.patchedZip;
+      linkedinOk = patchRes.patch.ok;
+    } else if (platformTarget === "TELEGRAM") {
+      const initJs = await readRepoScript("src/lib/scripts/telegram-init.js");
+      const patchRes = await applyTelegramPatch(finalZip, initJs);
+      finalZip = patchRes.patchedZip;
+      telegramOk = patchRes.patch.ok;
+    }
+
+    const patchedZip = finalZip;
 
     const fileName = `${certId}-${tier.toLowerCase()}-patched.zip`;
 
@@ -118,20 +176,25 @@ export async function POST(req: NextRequest) {
       normalizeBase: normalized.usedBaseDir,
       universalOk: !!uni?.result?.ok,
       overlayOk: !!ov?.patch?.ok,
+      metaOk,
+      discordOk,
+      youtubeOk,
+      tiktokOk,
+      linkedinOk,
     };
 
     const body = new Uint8Array(patchedZip);
 
-return new NextResponse(body, {
-  status: 200,
-  headers: {
-    "Content-Type": "application/zip",
-    "Content-Disposition": `attachment; filename="${fileName}"`,
-    "Cache-Control": "no-store",
-    "Content-Length": String(body.byteLength),
-    "X-H5S-Patch": JSON.stringify(debugSummary),
-  },
-});
+    return new NextResponse(body, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="${fileName}"`,
+        "Cache-Control": "no-store",
+        "Content-Length": String(body.byteLength),
+        "X-H5S-Patch": JSON.stringify(debugSummary),
+      },
+    });
 
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: err?.message || "Patch failed" }, { status: 500 });
